@@ -1,4 +1,4 @@
-// THEMIS AI Dispatch v6.1
+// THEMIS AI Dispatch v6.3
 const {
   SUPABASE_URL,
   SUPABASE_ANON_KEY,
@@ -5517,7 +5517,10 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
 
   if (!workingVehicles.length || !clusters.length) return assignments;
 
+  const LONG_BUNDLE_ROUND_TRIP_MINUTES = 55;
+  const actualLastHour = clusters.reduce((max, cluster) => Math.max(max, Number(cluster?.hour ?? -Infinity)), -Infinity);
   const vehicleUsage = new Map();
+  const vehicleLongClusterLocks = new Map();
 
   function getVehicleState(vehicleId) {
     if (!vehicleUsage.has(vehicleId)) {
@@ -5552,13 +5555,69 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
     }
   }
 
+  function getVehicleLockedAreas(vehicleId) {
+    return [...(vehicleLongClusterLocks.get(Number(vehicleId)) || [])];
+  }
+
+  function lockVehicleClusterArea(vehicleId, area) {
+    const normalized = normalizeAreaLabel(area);
+    if (!normalized || normalized === "無し") return;
+    const key = Number(vehicleId);
+    const existing = vehicleLongClusterLocks.get(key) || [];
+    if (!existing.includes(normalized)) {
+      vehicleLongClusterLocks.set(key, [...existing, normalized]);
+    }
+  }
+
+  function shouldClusterLock(cluster) {
+    return Number(cluster?.count || 0) >= 2 && getClusterRoundTripMinutes(cluster) >= LONG_BUNDLE_ROUND_TRIP_MINUTES;
+  }
+
+  function isClusterLockHardMismatch(clusterArea, lockedAreas = []) {
+    const normalized = normalizeAreaLabel(clusterArea);
+    const areas = Array.isArray(lockedAreas) ? lockedAreas.filter(Boolean).map(normalizeAreaLabel) : [];
+    if (!areas.length || !normalized || normalized === "無し") return false;
+    if (hasHardReverseMix(normalized, areas)) return true;
+
+    const canonical = getCanonicalArea(normalized);
+    const group = getAreaDisplayGroup(normalized);
+    const sameCanonical = areas.some(area => getCanonicalArea(area) && canonical && getCanonicalArea(area) === canonical);
+    const sameGroup = areas.some(area => getAreaDisplayGroup(area) === group);
+    if (sameCanonical || sameGroup) return false;
+
+    const bestAffinity = Math.max(...areas.map(area => getAreaAffinityScore(normalized, area)), 0);
+    const bestDirection = Math.max(...areas.map(area => getDirectionAffinityScore(normalized, area)), -999);
+    return bestAffinity < 64 && bestDirection < 24;
+  }
+
+  function getClusterLockPenalty(clusterArea, lockedAreas = []) {
+    const normalized = normalizeAreaLabel(clusterArea);
+    const areas = Array.isArray(lockedAreas) ? lockedAreas.filter(Boolean).map(normalizeAreaLabel) : [];
+    if (!areas.length || !normalized || normalized === "無し") return 0;
+    if (hasHardReverseMix(normalized, areas)) return 1200;
+
+    const canonical = getCanonicalArea(normalized);
+    const group = getAreaDisplayGroup(normalized);
+    const bestAffinity = Math.max(...areas.map(area => getAreaAffinityScore(normalized, area)), 0);
+    const bestDirection = Math.max(...areas.map(area => getDirectionAffinityScore(normalized, area)), -999);
+    const sameCanonical = areas.some(area => getCanonicalArea(area) && canonical && getCanonicalArea(area) === canonical);
+    const sameGroup = areas.some(area => getAreaDisplayGroup(area) === group);
+
+    if (sameCanonical) return -260;
+    if (sameGroup) return -140;
+    if (bestAffinity >= 72 && bestDirection >= 20) return -80;
+    if (bestAffinity >= 64 && bestDirection >= 18) return 120;
+    if (bestAffinity >= 56) return 260;
+    return 520;
+  }
+
   function getIdleVehicleCountForHour(hour) {
     return workingVehicles.filter(vehicle => getHourLoad(vehicle.id, hour) === 0).length;
   }
 
   function shouldPreferSpread(cluster, routeFlowScore, routeContinuityPenalty, sameHourLoad) {
     const roundTripMinutes = getClusterRoundTripMinutes(cluster);
-    if (roundTripMinutes >= 60) return false;
+    if (roundTripMinutes >= LONG_BUNDLE_ROUND_TRIP_MINUTES) return false;
     if (cluster.count <= 1) return true;
     if (sameHourLoad <= 0) return true;
     const strongRouteLink = routeFlowScore >= 90 && routeContinuityPenalty <= 45;
@@ -5613,7 +5672,7 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
   function shouldForceBundleCluster(cluster, existingAreas = []) {
     const roundTripMinutes = getClusterRoundTripMinutes(cluster);
     const bundleScore = getBundleCompatibilityScore(normalizeAreaLabel(cluster?.area || ""), existingAreas);
-    return roundTripMinutes >= 60 && bundleScore >= 70;
+    return roundTripMinutes >= LONG_BUNDLE_ROUND_TRIP_MINUTES && bundleScore >= 70;
   }
 
   function getDistanceZoneForAi(distanceKm) {
@@ -5891,7 +5950,9 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
     const dateStr = els.actualDate?.value || todayStr();
     const isLastRun = isLastClusterOfTheDay(cluster, dateStr);
     const defaultLastHour = getDefaultLastHour(dateStr);
-    const isDefaultLastHourCluster = Number(cluster.hour) === Number(defaultLastHour);
+    const isDefaultLastHourCluster =
+      Number(cluster.hour) === Number(defaultLastHour) &&
+      Number(cluster.hour) === Number(actualLastHour);
 
     const candidateScores = workingVehicles
       .map(vehicle => {
@@ -5923,6 +5984,8 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
         const hardReverse = isHardReverseForHome(normalizedClusterArea, homeArea);
         const existingHourAreas = getHourAreas(vehicle.id, cluster.hour);
         const hardReverseMixBlocked = existingHourAreas.length && hasHardReverseMix(normalizedClusterArea, existingHourAreas);
+        const lockedAreas = getVehicleLockedAreas(vehicle.id);
+        const clusterLockPenalty = getClusterLockPenalty(normalizedClusterArea, lockedAreas);
         const areaMixGuardScore = getAreaMixGuardScore(normalizedClusterArea, existingHourAreas, isLastRun || isDefaultLastHourCluster);
         const routeFlowScore = getRouteFlowVehicleScore(normalizedClusterArea, existingHourAreas, homeArea);
         const routeContinuityPenalty = getRouteContinuityPenalty(normalizedClusterArea, existingHourAreas, homeArea);
@@ -5946,6 +6009,7 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
         score -= routeFlowScore * (isLastRun || isDefaultLastHourCluster ? 2.25 : 1.55);
         score += routeContinuityPenalty * (isLastRun || isDefaultLastHourCluster ? 2.45 : 1.55);
         score += areaMixGuardScore;
+        score += clusterLockPenalty;
         score -= Math.max(directionAffinity, 0) * (isLastRun || isDefaultLastHourCluster ? 2.2 : 0.45);
         score -= strictHomeScore * (isLastRun || isDefaultLastHourCluster ? 2.8 : 0.55);
 
@@ -5961,7 +6025,7 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
         // 月間平均距離が高い車両に積みすぎない
         score += projectedAvg * 0.55;
 
-        // 通常便は、往復60分以上なら同方向クラスターを優先し、近距離だけ分散を許容する
+        // 通常便は、往復55分以上なら同方向クラスターを優先し、近距離だけ分散を許容する
         if (!(isLastRun || isDefaultLastHourCluster)) {
           const idleVehicleCount = getIdleVehicleCountForHour(cluster.hour);
           const roundTripMinutes = getClusterRoundTripMinutes(cluster);
@@ -5983,7 +6047,7 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
             !rotationPrediction.canShare);
 
           if (sameHourLoad === 0) {
-            if (roundTripMinutes < 60) {
+            if (roundTripMinutes < LONG_BUNDLE_ROUND_TRIP_MINUTES) {
               score -= idleVehicleCount > 1 ? 150 : 95;
             } else {
               score += idleVehicleCount > 1 ? 35 : 12;
@@ -5996,11 +6060,11 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
             score -= 18;
           }
 
-          score -= bundleCompatibility * (roundTripMinutes >= 60 ? 1.45 : 0.65);
+          score -= bundleCompatibility * (roundTripMinutes >= LONG_BUNDLE_ROUND_TRIP_MINUTES ? 1.45 : 0.65);
           if (forceBundle && sameHourLoad > 0) {
             score -= 180;
           }
-          if (roundTripMinutes < 60 && sameHourLoad > 0 && bundleCompatibility < 50 && idleVehicleCount > 0) {
+          if (roundTripMinutes < LONG_BUNDLE_ROUND_TRIP_MINUTES && sameHourLoad > 0 && bundleCompatibility < 50 && idleVehicleCount > 0) {
             score += 75;
           }
 
@@ -6089,9 +6153,10 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
       const bestRouteContinuityPenalty = getRouteContinuityPenalty(normalizeAreaLabel(cluster.area), bestExistingAreas, normalizeAreaLabel(bestVehicle?.home_area || ""));
       const idleVehicleCount = getIdleVehicleCountForHour(cluster.hour);
       const forceBundle = shouldForceBundleCluster(cluster, bestExistingAreas);
-      const keepTogether = (isLastRun || isDefaultLastHourCluster)
+      const clusterLocked = shouldClusterLock(cluster);
+      const keepTogether = clusterLocked || ((isLastRun || isDefaultLastHourCluster)
         ? true
-        : forceBundle || !shouldPreferSpread(cluster, bestRouteFlowScore, bestRouteContinuityPenalty, bestHourLoad) || idleVehicleCount <= 1;
+        : forceBundle || !shouldPreferSpread(cluster, bestRouteFlowScore, bestRouteContinuityPenalty, bestHourLoad) || idleVehicleCount <= 1);
 
       if (keepTogether) {
         sortedItems.forEach(item => {
@@ -6111,6 +6176,9 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
           calculateRouteDistance(sortedItems),
           cluster.area
         );
+        if (clusterLocked || forceBundle) {
+          lockVehicleClusterArea(bestVehicle.id, cluster.area);
+        }
         continue;
       }
     }
@@ -6135,6 +6203,9 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
           const homeArea = normalizeAreaLabel(vehicle?.home_area || "");
           const existingHourAreas = getHourAreas(vehicle.id, cluster.hour);
           const hardReverseMixBlocked = existingHourAreas.length && hasHardReverseMix(normalizedClusterArea, existingHourAreas);
+          const lockedAreas = getVehicleLockedAreas(vehicle.id);
+          const clusterLockPenalty = getClusterLockPenalty(normalizedClusterArea, lockedAreas);
+          if (isClusterLockHardMismatch(normalizedClusterArea, lockedAreas)) return null;
           const areaMixGuardScore = getAreaMixGuardScore(normalizedClusterArea, existingHourAreas, isLastRun || isDefaultLastHourCluster);
           const routeFlowScore = getRouteFlowVehicleScore(normalizedClusterArea, existingHourAreas, homeArea);
           const routeContinuityPenalty = getRouteContinuityPenalty(normalizedClusterArea, existingHourAreas, homeArea);
@@ -6165,6 +6236,7 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
           score -= routeFlowScore * (isLastRun || isDefaultLastHourCluster ? 2.0 : 1.4);
           score += routeContinuityPenalty * (isLastRun || isDefaultLastHourCluster ? 2.2 : 1.4);
           score += areaMixGuardScore;
+          score += clusterLockPenalty;
 
           // 同時間帯負荷
           score += sameHourLoad * 35;
@@ -6187,7 +6259,7 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
             score += isLastRun || isDefaultLastHourCluster ? 880 : 620;
           }
 
-          // 通常便は往復60分以上なら同方向束ね、近距離だけ分散を優先
+          // 通常便は往復55分以上なら同方向束ね、近距離だけ分散を優先
           if (!(isLastRun || isDefaultLastHourCluster)) {
             const idleVehicleCount = getIdleVehicleCountForHour(cluster.hour);
             const pseudoCluster = { ...cluster, count: 1, totalDistance: Number(item.distance_km || 0), items: [item] };
@@ -6210,7 +6282,7 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
               (!(routeFlowScore >= 85 && routeContinuityPenalty <= 45) || !rotationPrediction.canShare);
 
             if (sameHourLoad === 0) {
-              if (roundTripMinutes < 60) score -= idleVehicleCount > 1 ? 135 : 84;
+              if (roundTripMinutes < LONG_BUNDLE_ROUND_TRIP_MINUTES) score -= idleVehicleCount > 1 ? 135 : 84;
               else score += idleVehicleCount > 1 ? 35 : 12;
             } else if (preferSpread && idleVehicleCount > 0) {
               score += 130 + sameHourLoad * 30;
@@ -6219,9 +6291,9 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
               score -= 10;
             }
 
-            score -= bundleCompatibility * (roundTripMinutes >= 60 ? 1.35 : 0.55);
+            score -= bundleCompatibility * (roundTripMinutes >= LONG_BUNDLE_ROUND_TRIP_MINUTES ? 1.35 : 0.55);
             if (forceBundle && sameHourLoad > 0) score -= 150;
-            if (roundTripMinutes < 60 && sameHourLoad > 0 && bundleCompatibility < 50 && idleVehicleCount > 0) score += 60;
+            if (roundTripMinutes < LONG_BUNDLE_ROUND_TRIP_MINUTES && sameHourLoad > 0 && bundleCompatibility < 50 && idleVehicleCount > 0) score += 60;
 
             score += getNormalRunReturnPenalty(
               cluster.hour,
@@ -6277,6 +6349,9 @@ function optimizeAssignments(items, vehicles, monthlyMap) {
         Number(item.distance_km || 0),
         cluster.area
       );
+      if (shouldClusterLock({ ...cluster, count: 1, totalDistance: Number(item.distance_km || 0), items: [item] })) {
+        lockVehicleClusterArea(bestVehicle.id, cluster.area);
+      }
     }
   }
 
@@ -6695,12 +6770,39 @@ function buildLineResultText() {
 
 
 
+function getOvernightLooseHourBucket(item) {
+  const hour = Number(item?.actual_hour ?? item?.plan_hour ?? 0);
+  return hour >= 0 && hour <= 5 ? "overnight" : String(hour);
+}
+
 function getAssignmentItemHourGroupKey(item) {
   const area = normalizeAreaLabel(item?.destination_area || item?.cluster_area || item?.planned_area || item?.casts?.area || "無し");
   const canonical = getCanonicalArea(area) || area;
   const group = getAreaDisplayGroup(area) || canonical || area;
-  const hour = Number(item?.actual_hour ?? item?.plan_hour ?? 0);
-  return `${hour}__${group}__${canonical}`;
+  const hourBucket = getOvernightLooseHourBucket(item);
+  return `${hourBucket}__${group}__${canonical}`;
+}
+
+function getSoftBridgeAreaScore(baseArea, compareArea) {
+  const base = getCanonicalArea(normalizeAreaLabel(baseArea)) || normalizeAreaLabel(baseArea);
+  const compare = getCanonicalArea(normalizeAreaLabel(compareArea)) || normalizeAreaLabel(compareArea);
+  if (!base || !compare) return 0;
+  if (base === compare) return 140;
+
+  const northeast = new Set(["我孫子方面", "取手方面", "藤代方面", "守谷方面", "牛久方面"]);
+  const eastUrban = new Set(["葛飾方面", "足立方面", "墨田方面", "荒川方面", "江戸川方面", "市川方面"]);
+  const downtownBridge = new Set(["墨田方面", "荒川方面"]);
+
+  if ((base === "我孫子方面" && eastUrban.has(compare)) || (compare === "我孫子方面" && eastUrban.has(base))) return 108;
+  if ((northeast.has(base) && eastUrban.has(compare)) || (northeast.has(compare) && eastUrban.has(base))) return 92;
+  if ((base === "我孫子方面" && northeast.has(compare)) || (compare === "我孫子方面" && northeast.has(base))) return 132;
+  if ((downtownBridge.has(base) && eastUrban.has(compare)) || (downtownBridge.has(compare) && eastUrban.has(base))) return 86;
+
+  const affinity = getAreaAffinityScore(base, compare);
+  const direction = getDirectionAffinityScore(base, compare);
+  if (affinity >= 72 && direction >= 0) return 74;
+  if (affinity >= 58 && direction >= 18) return 54;
+  return 0;
 }
 
 function getRoundTripMinutesForItem(item) {
@@ -6724,8 +6826,9 @@ function rebundleLongDistanceDirectionalClusters(assignments, items, vehicles, m
 
   const itemMap = new Map(items.map(item => [Number(item.id), item]));
   const vehicleMap = new Map(vehicles.map(v => [Number(v.id), v]));
-  const vehicleLoadMap = countAssignmentsByVehicle(working);
   const threshold = Number(options.roundTripThreshold || 55);
+
+  const rebuildVehicleLoadMap = () => countAssignmentsByVehicle(working);
 
   const byKey = new Map();
   working.forEach(a => {
@@ -6750,6 +6853,7 @@ function rebundleLongDistanceDirectionalClusters(assignments, items, vehicles, m
 
     let bestVehicleId = null;
     let bestScore = -Infinity;
+    const vehicleLoadMap = rebuildVehicleLoadMap();
 
     for (const vehicle of vehicles) {
       const vehicleId = Number(vehicle.id);
@@ -6780,7 +6884,7 @@ function rebundleLongDistanceDirectionalClusters(assignments, items, vehicles, m
       const currentCountInCluster = clusterAssignments.filter(a => Number(a.vehicle_id) === vehicleId).length;
       const totalClusterDistance = itemsForCluster.reduce((sum, item) => sum + Number(item?.distance_km || 0), 0);
       let score = 0;
-      score += currentCountInCluster * 260; // already hosting one of the cluster items
+      score += currentCountInCluster * 260;
       score += sameGroupBonus;
       score += strict * 1.3 + direction * 0.9 + affinity * 0.6;
       score -= Number(month.totalDistance || 0) * 0.02;
@@ -6800,6 +6904,81 @@ function rebundleLongDistanceDirectionalClusters(assignments, items, vehicles, m
       a.vehicle_id = bestVehicleId;
       a.driver_name = vehicle?.driver_name || "";
     });
+  }
+
+  const evaluateBridgeVehicle = (assignment, vehicle) => {
+    const item = itemMap.get(Number(assignment.item_id));
+    if (!item || !vehicle) return -Infinity;
+    const targetArea = normalizeAreaLabel(item?.destination_area || item?.cluster_area || item?.planned_area || item?.casts?.area || "無し");
+    const vehicleId = Number(vehicle.id);
+    const existingAssignments = working.filter(a => Number(a.vehicle_id) === vehicleId && Number(a.item_id) !== Number(assignment.item_id));
+    const existingAreas = existingAssignments
+      .map(a => {
+        const row = itemMap.get(Number(a.item_id));
+        return normalizeAreaLabel(row?.destination_area || row?.cluster_area || row?.planned_area || row?.casts?.area || "無し");
+      })
+      .filter(Boolean);
+
+    if (existingAreas.length && existingAreas.some(area => hasHardReverseMix(targetArea, [area]))) return -Infinity;
+    if (isHardReverseForHome(targetArea, vehicle?.home_area || "")) return -Infinity;
+
+    const month = monthlyMap?.get(vehicleId) || { totalDistance: 0, avgDistance: 0, workedDays: 0 };
+    const existingCount = existingAssignments.length;
+    const strict = getStrictHomeCompatibilityScore(targetArea, vehicle?.home_area || "");
+    const direction = Math.max(0, getDirectionAffinityScore(targetArea, vehicle?.home_area || ""));
+    const bestBridge = existingAreas.length
+      ? Math.max(...existingAreas.map(area => getSoftBridgeAreaScore(targetArea, area)))
+      : 0;
+    const bestAffinity = existingAreas.length
+      ? Math.max(...existingAreas.map(area => getAreaAffinityScore(targetArea, area)))
+      : getAreaAffinityScore(targetArea, vehicle?.home_area || "");
+    const bundleCount = existingAreas.filter(area => getSoftBridgeAreaScore(targetArea, area) >= 90).length;
+    const isLooseOvernight = getOvernightLooseHourBucket(item) === "overnight";
+    let score = 0;
+    score += bestBridge * 3.6;
+    score += bundleCount * 110;
+    score += strict * 1.15 + direction * 0.7 + bestAffinity * 0.4;
+    score -= Number(month.totalDistance || 0) * 0.018;
+    score -= Number(month.avgDistance || 0) * 0.11;
+    score -= existingCount * 14;
+    if (isLooseOvernight) score += 44;
+    if (!existingAreas.length) score -= 120;
+    return score;
+  };
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    for (const assignment of [...working]) {
+      const item = itemMap.get(Number(assignment.item_id));
+      if (!item) continue;
+      if (getOvernightLooseHourBucket(item) !== "overnight") continue;
+
+      const targetArea = normalizeAreaLabel(item?.destination_area || item?.cluster_area || item?.planned_area || item?.casts?.area || "無し");
+      const currentVehicle = vehicleMap.get(Number(assignment.vehicle_id));
+      const currentScore = evaluateBridgeVehicle(assignment, currentVehicle);
+      let bestVehicle = currentVehicle;
+      let bestScore = currentScore;
+
+      for (const vehicle of vehicles) {
+        const score = evaluateBridgeVehicle(assignment, vehicle);
+        if (score > bestScore) {
+          bestScore = score;
+          bestVehicle = vehicle;
+        }
+      }
+
+      if (!bestVehicle || Number(bestVehicle.id) === Number(assignment.vehicle_id)) continue;
+      if (bestScore < currentScore + 42) continue;
+
+      const destinationAssignments = working.filter(a => Number(a.vehicle_id) === Number(bestVehicle.id) && Number(a.item_id) !== Number(assignment.item_id));
+      const destinationAreas = destinationAssignments.map(a => {
+        const row = itemMap.get(Number(a.item_id));
+        return normalizeAreaLabel(row?.destination_area || row?.cluster_area || row?.planned_area || row?.casts?.area || "無し");
+      }).filter(Boolean);
+      if (destinationAreas.length && destinationAreas.every(area => getSoftBridgeAreaScore(targetArea, area) < 70)) continue;
+
+      assignment.vehicle_id = Number(bestVehicle.id);
+      assignment.driver_name = bestVehicle?.driver_name || "";
+    }
   }
 
   return working;
@@ -8340,7 +8519,7 @@ runAutoDispatch = async function() {
 
 
 
-/* ===== THEMIS v6.1 配車AI強化版 patch start ===== */
+/* ===== THEMIS v5.4 配車AI強化版 patch start ===== */
 
 function getThemisV54RowPoint(row) {
   const lat = toNullableNumber(row?.casts?.latitude ?? row?.latitude);
@@ -8414,7 +8593,7 @@ function getThemisV54TravelSummary(rows) {
       sendOnlyMinutes: 0,
       stopCount: 0,
       segmentMinutes: [],
-      model: "v6.1"
+      model: "v5.4"
     };
   }
 
@@ -8426,7 +8605,6 @@ function getThemisV54TravelSummary(rows) {
 
   ordered.forEach((row, index) => {
     let legMinutes = 0;
-
     if (index === 0) {
       legMinutes = getThemisV54StoredTravelMinutes(row);
       if (!(legMinutes > 0)) {
@@ -8446,26 +8624,20 @@ function getThemisV54TravelSummary(rows) {
     if (point) currentPoint = point;
   });
 
-  outboundMinutes = Math.max(0, Math.round(outboundMinutes));
-
-  // v6.1 rule
-  // 1件目: travel_minutes をそのまま採用
-  // 2件目以降: 区間距離 ÷ そのキャストの平均速度で区間時間を算出
-  // 復路: 往路合計と同値
-  // ラスト便: 片道のみ
-  const sendOnlyMinutes = outboundMinutes;
+  const dwellMinutes = stopCount;
+  const sendOnlyMinutes = Math.max(0, Math.round(outboundMinutes + dwellMinutes));
   const isLastTrip = getThemisV54VehicleIsLastTrip(ordered);
-  const returnMinutes = isLastTrip ? 0 : outboundMinutes;
-  const totalMinutes = isLastTrip ? sendOnlyMinutes : (sendOnlyMinutes + returnMinutes);
+  const returnMinutes = isLastTrip ? 0 : Math.max(0, Math.round(outboundMinutes));
+  const totalMinutes = Math.max(0, Math.round(sendOnlyMinutes + returnMinutes));
 
   return {
-    outboundMinutes,
+    outboundMinutes: Math.round(outboundMinutes),
     returnMinutes,
-    totalMinutes: Math.max(0, Math.round(totalMinutes)),
+    totalMinutes,
     sendOnlyMinutes,
     stopCount,
     segmentMinutes,
-    model: "v6.1"
+    model: "v5.4"
   };
 }
 
@@ -8781,7 +8953,7 @@ runAutoDispatch = async function() {
   return result;
 };
 
-/* ===== THEMIS v6.1 配車AI強化版 patch end ===== */
+/* ===== THEMIS v5.4 配車AI強化版 patch end ===== */
 
 
 /* ===== THEMIS v5.5.1 patch start ===== */
