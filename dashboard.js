@@ -4945,39 +4945,31 @@ function renderDailyVehicleChecklist() {
     return;
   }
 
-  const head = document.createElement("div");
-  head.className = "vehicle-checklist-head";
-  head.innerHTML = `
-    <div></div>
-    <div class="vehicle-check-head-label">出勤</div>
-    <div class="vehicle-check-head-label">ラスト便</div>
+  const header = document.createElement("div");
+  header.className = "vehicle-check-header";
+  header.innerHTML = `
+    <div class="vehicle-check-header-info"></div>
+    <div class="vehicle-check-header-col">出勤</div>
+    <div class="vehicle-check-header-col">ラスト便</div>
   `;
-  els.dailyVehicleChecklist.appendChild(head);
+  els.dailyVehicleChecklist.appendChild(header);
 
   allVehiclesCache.forEach(vehicle => {
     const row = document.createElement("div");
     row.className = "vehicle-check-item";
     row.innerHTML = `
-      <div class="vehicle-check-main">
-        <div class="vehicle-check-name">${escapeHtml(vehicle.driver_name || vehicle.plate_number || "-")}</div>
-        <div class="vehicle-check-sub">${escapeHtml(vehicle.plate_number || "-")}</div>
-        <div class="vehicle-check-meta">
-          <span class="vehicle-check-pill">担当 ${escapeHtml(normalizeAreaLabel(vehicle.vehicle_area || "無し"))}</span>
-          <span class="vehicle-check-pill">帰宅 ${escapeHtml(normalizeAreaLabel(vehicle.home_area || "無し"))}</span>
-          <span class="vehicle-check-pill">定員 ${vehicle.seat_capacity ?? "-"}</span>
-        </div>
+      <div class="vehicle-check-info">
+        <div class="vehicle-check-name">${escapeHtml(vehicle.driver_name || "-")}</div>
+        <div class="vehicle-check-car">車両 ${escapeHtml(vehicle.plate_number || "-")}</div>
+        <div class="vehicle-check-meta">担当 ${escapeHtml(normalizeAreaLabel(vehicle.vehicle_area || "-"))} / 帰宅 ${escapeHtml(normalizeAreaLabel(vehicle.home_area || "-"))} / 定員 ${vehicle.seat_capacity ?? "-"}</div>
       </div>
-      <label class="vehicle-check-col">
-        <div class="vehicle-check-box">
-          <input class="vehicle-check-input" type="checkbox" data-id="${vehicle.id}" ${activeVehicleIdsForToday.has(Number(vehicle.id)) ? "checked" : ""} />
-          <span>出勤</span>
-        </div>
+      <label class="vehicle-check-toggle vehicle-check-toggle-work">
+        <input class="vehicle-check-input" type="checkbox" data-id="${vehicle.id}" ${activeVehicleIdsForToday.has(Number(vehicle.id)) ? "checked" : ""} />
+        <span>出勤</span>
       </label>
-      <label class="vehicle-check-col">
-        <div class="vehicle-check-box">
-          <input class="driver-last-trip-input" type="checkbox" data-id="${vehicle.id}" ${isDriverLastTripChecked(vehicle.id) ? "checked" : ""} />
-          <span>ラスト便</span>
-        </div>
+      <label class="vehicle-check-toggle vehicle-check-toggle-last">
+        <input class="driver-last-trip-input" type="checkbox" data-id="${vehicle.id}" ${isDriverLastTripChecked(vehicle.id) ? "checked" : ""} />
+        <span>ラスト便</span>
       </label>
     `;
     els.dailyVehicleChecklist.appendChild(row);
