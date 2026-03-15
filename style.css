@@ -401,27 +401,90 @@ textarea{
 
 .vehicle-checklist{
   display:grid;
-  gap:10px;
-  margin-top:8px;
+  grid-template-columns:1fr;
+  gap:12px;
+  margin-top:12px;
+}
+
+.vehicle-check-header{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 110px 110px;
+  align-items:end;
+  gap:14px;
+  padding:0 12px 2px;
+}
+
+.vehicle-check-header-col{
+  text-align:center;
+  font-size:13px;
+  font-weight:800;
+  color:#dfe9f8;
 }
 
 .vehicle-check-item{
   display:grid;
-  grid-template-columns:1fr auto;
+  grid-template-columns:minmax(0,1fr) 110px 110px;
   align-items:center;
   gap:14px;
-  padding:10px 0;
+  padding:14px 12px;
+  border:1px solid rgba(255,255,255,.08);
+  border-radius:18px;
+  background:linear-gradient(90deg, rgba(255,255,255,.02), rgba(255,255,255,.00) 40%, rgba(255,255,255,.02));
 }
 
-.vehicle-check-label{
-  color:#e8eef9;
+.vehicle-check-info{
+  min-width:0;
+}
+
+.vehicle-check-name{
+  font-size:18px;
+  font-weight:800;
+  color:#fff;
+  line-height:1.25;
+}
+
+.vehicle-check-car{
+  margin-top:4px;
+  font-size:15px;
+  font-weight:700;
+  color:#dce6f5;
+}
+
+.vehicle-check-meta{
+  margin-top:6px;
+  font-size:13px;
+  color:#aebcd0;
   line-height:1.6;
-  font-size:14px;
 }
 
-.vehicle-check-input{
-  width:18px;
-  height:18px;
+.vehicle-check-toggle{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:8px;
+  min-height:74px;
+  padding:10px 8px;
+  border-radius:16px;
+  background:rgba(255,255,255,.02);
+  border:1px solid rgba(255,255,255,.08);
+  font-size:13px;
+  font-weight:700;
+  cursor:pointer;
+}
+
+.vehicle-check-toggle-work{
+  color:#e8eef9;
+}
+
+.vehicle-check-toggle-last{
+  color:#ffdf8c;
+}
+
+.vehicle-check-input,
+.driver-last-trip-input{
+  width:19px;
+  height:19px;
   accent-color:#ff3b2f;
 }
 
@@ -1695,34 +1758,56 @@ img, table, input, select, textarea, button{
 .geo-status.error{color:#ffb4b4;border-color:rgba(224,82,82,.55);background:rgba(224,82,82,.10);}
 .geo-status.manual{color:#ffd782;border-color:rgba(255,195,0,.45);background:rgba(255,195,0,.08);}
 
-/* ===== THEMIS v6.4.8 vehicle list mobile 2 column ===== */
-.vehicle-check-item{
-  background:rgba(255,255,255,.02);
-  border-radius:12px;
-  padding:8px 10px;
+
+/* ===============================
+   Daily vehicle checklist tuning
+================================ */
+@media (max-width: 900px){
+  .vehicle-check-header,
+  .vehicle-check-item{
+    grid-template-columns:minmax(0,1fr) 92px 92px;
+  }
 }
 
-@media (max-width:700px){
-
+@media (max-width: 700px){
   .vehicle-checklist{
-    display:grid;
     grid-template-columns:1fr 1fr;
-    gap:8px;
+    gap:10px;
+  }
+
+  .vehicle-check-header{
+    display:none;
   }
 
   .vehicle-check-item{
-    grid-template-columns:1fr;
-    padding:8px;
+    grid-template-columns:1fr 1fr;
+    gap:8px;
+    padding:12px 10px;
+    align-items:stretch;
   }
 
-  .vehicle-check-label{
-    font-size:13px;
-    line-height:1.4;
+  .vehicle-check-info{
+    grid-column:1 / -1;
   }
 
-  .vehicle-check-input{
-    width:16px;
-    height:16px;
+  .vehicle-check-name{
+    font-size:16px;
   }
 
+  .vehicle-check-car{
+    font-size:14px;
+  }
+
+  .vehicle-check-meta{
+    font-size:12px;
+  }
+
+  .vehicle-check-toggle{
+    min-height:auto;
+    flex-direction:row;
+    justify-content:center;
+    gap:7px;
+    padding:8px 6px;
+    font-size:12px;
+  }
 }
