@@ -6888,22 +6888,15 @@ function getSoftBridgeAreaScore(baseArea, compareArea) {
 
   const northeast = new Set(["我孫子方面", "取手方面", "藤代方面", "守谷方面", "牛久方面"]);
   const eastUrban = new Set(["葛飾方面", "足立方面", "墨田方面", "荒川方面", "江戸川方面", "市川方面"]);
-  const chibaEast = new Set(["市川方面", "船橋方面", "鎌ヶ谷方面"]);
   const downtownBridge = new Set(["墨田方面", "荒川方面"]);
-  const outerFarEast = new Set(["牛久方面"]);
 
   if ((base === "我孫子方面" && eastUrban.has(compare)) || (compare === "我孫子方面" && eastUrban.has(base))) return 108;
-  if ((outerFarEast.has(base) && chibaEast.has(compare)) || (outerFarEast.has(compare) && chibaEast.has(base))) return 0;
-  if ((outerFarEast.has(base) && eastUrban.has(compare)) || (outerFarEast.has(compare) && eastUrban.has(base))) return 18;
   if ((northeast.has(base) && eastUrban.has(compare)) || (northeast.has(compare) && eastUrban.has(base))) return 92;
   if ((base === "我孫子方面" && northeast.has(compare)) || (compare === "我孫子方面" && northeast.has(base))) return 132;
   if ((downtownBridge.has(base) && eastUrban.has(compare)) || (downtownBridge.has(compare) && eastUrban.has(base))) return 86;
 
   const affinity = getAreaAffinityScore(base, compare);
   const direction = getDirectionAffinityScore(base, compare);
-  if ((outerFarEast.has(base) && affinity < 88) || (outerFarEast.has(compare) && affinity < 88)) {
-    if (direction < 72) return 0;
-  }
   if (affinity >= 72 && direction >= 0) return 74;
   if (affinity >= 58 && direction >= 18) return 54;
   return 0;
@@ -7038,13 +7031,10 @@ function rebundleLongDistanceDirectionalClusters(assignments, items, vehicles, m
       : getAreaAffinityScore(targetArea, vehicle?.home_area || "");
     const bundleCount = existingAreas.filter(area => getSoftBridgeAreaScore(targetArea, area) >= 90).length;
     const isLooseOvernight = getOvernightLooseHourBucket(item) === "overnight";
-    const targetCanonical = getCanonicalArea(targetArea) || targetArea;
-    const hasOuterFarEastMismatch = targetCanonical === "牛久方面" && existingAreas.some(area => !["我孫子方面", "取手方面", "藤代方面", "守谷方面", "牛久方面"].includes(getCanonicalArea(area) || area));
     let score = 0;
     score += bestBridge * 3.6;
     score += bundleCount * 110;
     score += strict * 1.15 + direction * 0.7 + bestAffinity * 0.4;
-    if (hasOuterFarEastMismatch) score -= 420;
     score -= Number(month.totalDistance || 0) * 0.018;
     score -= Number(month.avgDistance || 0) * 0.11;
     score -= existingCount * 14;
@@ -7158,12 +7148,6 @@ function isBundleCompatibilityMoveBlocked(targetArea, destinationAreas = [], idl
   const bestAffinity = Math.max(...areas.map(area => getAreaAffinityScore(normalized, area)), 0);
   const bestDirection = Math.max(...areas.map(area => getDirectionAffinityScore(normalized, area)), -999);
   const bundleCompatibility = Math.max(...areas.map(area => getSoftBridgeAreaScore(normalized, area)), 0);
-
-  const isOuterFarEast = canonical === "牛久方面";
-  if (isOuterFarEast) {
-    const hasNearNortheastMate = areas.some(area => ["我孫子方面", "取手方面", "藤代方面", "守谷方面", "牛久方面"].includes(getCanonicalArea(area) || area));
-    if (!hasNearNortheastMate) return true;
-  }
 
   if (bundleCompatibility >= 90) return false;
   if (bestAffinity >= 78 && bestDirection >= 28) return false;
@@ -9896,145 +9880,388 @@ optimizeAssignmentsByDistanceBalance = function(assignments, items, vehicles, mo
   return working;
 };
 
-/* ===== THEMIS v6.4.12 no-idle rebundle patch start ===== */
+
+/* ===== THEMIS v6.5.1 field-first fixed rule patch ===== */
 (function(){
-  const _THEMIS_V6412_BASE_optimizeAssignments = optimizeAssignments;
-
-  function v6412NormArea(row) {
-    return normalizeAreaLabel(
-      row?.destination_area || row?.cluster_area || row?.planned_area || row?.casts?.area || '無し'
-    );
+  function v651NormalizeArea(area) {
+    return normalizeAreaLabel(area || "");
   }
 
-  function v6412PairScore(areaA, areaB) {
-    const a = v6412NormArea({ destination_area: areaA });
-    const b = v6412NormArea({ destination_area: areaB });
-    if (!a || !b) return 0;
-    const canonA = getCanonicalArea(a) || '';
-    const canonB = getCanonicalArea(b) || '';
-    const groupA = getAreaDisplayGroup(a) || '';
-    const groupB = getAreaDisplayGroup(b) || '';
-    const affinity = Number(getAreaAffinityScore(a, b) || 0);
-    const direction = Number(getDirectionAffinityScore(a, b) || 0);
-    const bridge = Number(getSoftBridgeAreaScore(a, b) || 0);
-
-    if (canonA && canonB && canonA === canonB) return 360 + bridge + affinity + Math.max(0, direction);
-    if (groupA && groupB && groupA === groupB) return 260 + bridge + affinity + Math.max(0, direction);
-    if (bridge >= 90) return 240 + bridge + affinity + Math.max(0, direction);
-    if (bridge >= 75) return 140 + bridge + affinity + Math.max(0, direction);
-    if (affinity >= 78) return 110 + affinity + Math.max(0, direction);
-    if (direction <= -35) return -420;
-    if (bridge < 55 && affinity < 60 && direction < 18) return -180;
-    return affinity + Math.max(-20, direction);
+  function v651IsEastNear(area) {
+    const a = v651NormalizeArea(area);
+    return ["市川", "船橋", "鎌ヶ谷", "鎌ケ谷", "習志野"].some(k => a.includes(k));
   }
 
-  function v6412VehicleHourScore(rows, vehicleId, hour) {
-    const list = rows.filter(r => Number(r?.vehicle_id || 0) === Number(vehicleId) && Number(r?.actual_hour ?? 0) === Number(hour));
-    if (list.length <= 1) return 0;
+  function v651IsToride(area) {
+    const a = v651NormalizeArea(area);
+    return a.includes("取手") || a.includes("藤代");
+  }
+
+  function v651IsUshiku(area) {
+    const a = v651NormalizeArea(area);
+    return a.includes("牛久") || a.includes("ひたち野うしく");
+  }
+
+  function v651IsAkebono(area) {
+    return v651NormalizeArea(area).includes("あけぼの");
+  }
+
+  function v651IsNortheastLong(area) {
+    const a = v651NormalizeArea(area);
+    return v651IsToride(a) || v651IsUshiku(a) || v651IsAkebono(a) || a.includes("我孫子") || a.includes("柏");
+  }
+
+  function v651FieldPairScore(areaA, areaB) {
+    const a = v651NormalizeArea(areaA);
+    const b = v651NormalizeArea(areaB);
     let score = 0;
-    for (let i = 0; i < list.length; i += 1) {
-      for (let j = i + 1; j < list.length; j += 1) {
-        score += v6412PairScore(v6412NormArea(list[i]), v6412NormArea(list[j]));
+
+    if (v651IsEastNear(a) && v651IsEastNear(b)) score += 220;
+    if ((v651IsUshiku(a) && v651IsToride(b)) || (v651IsUshiku(b) && v651IsToride(a))) score += 280;
+    if ((v651IsAkebono(a) && v651IsToride(b)) || (v651IsAkebono(b) && v651IsToride(a))) score += 90;
+    if (v651IsNortheastLong(a) && v651IsNortheastLong(b)) score += 45;
+
+    if ((v651IsEastNear(a) && v651IsNortheastLong(b)) || (v651IsEastNear(b) && v651IsNortheastLong(a))) score -= 130;
+    if ((v651IsAkebono(a) && v651IsEastNear(b)) || (v651IsAkebono(b) && v651IsEastNear(a))) score -= 90;
+
+    return score;
+  }
+
+  function v651BuildMaps(items, vehicles) {
+    const itemMap = new Map((items || []).map(item => [Number(item.id), item]));
+    const vehicleMap = new Map((vehicles || []).map(v => [Number(v.id), v]));
+    return { itemMap, vehicleMap };
+  }
+
+  function v651GetAreaByAssignment(assignment, itemMap) {
+    const item = itemMap.get(Number(assignment?.item_id));
+    return v651NormalizeArea(item?.destination_area || item?.cluster_area || item?.planned_area || item?.casts?.area || "");
+  }
+
+  function v651GetVehicleAssignments(rows, vehicleId) {
+    return rows.filter(r => Number(r.vehicle_id) === Number(vehicleId));
+  }
+
+  function v651GetVehicleAreas(rows, vehicleId, itemMap) {
+    return v651GetVehicleAssignments(rows, vehicleId).map(r => v651GetAreaByAssignment(r, itemMap)).filter(Boolean);
+  }
+
+  function v651GetVehicleFieldScore(rows, vehicleId, targetArea, itemMap) {
+    const areas = v651GetVehicleAreas(rows, vehicleId, itemMap);
+    if (!areas.length) return 0;
+    return Math.max(...areas.map(area => v651FieldPairScore(targetArea, area)), 0);
+  }
+
+  function v651GetHourLoad(rows, vehicleId, hour, excludeItemId) {
+    return rows.filter(r => Number(r.vehicle_id) === Number(vehicleId) && Number(r.actual_hour) === Number(hour) && Number(r.item_id) !== Number(excludeItemId || -1)).length;
+  }
+
+  function v651CanMove(rows, vehicles, assignment, targetVehicleId, excludeItemId) {
+    const vehicle = (vehicles || []).find(v => Number(v.id) === Number(targetVehicleId));
+    if (!vehicle) return false;
+    const hour = Number(assignment?.actual_hour || 0);
+    const load = v651GetHourLoad(rows, targetVehicleId, hour, excludeItemId);
+    return load < Number(vehicle.seat_capacity || 4);
+  }
+
+  function v651MoveAssignment(rows, itemId, targetVehicleId, vehicleMap) {
+    const row = rows.find(r => Number(r.item_id) === Number(itemId));
+    if (!row) return;
+    row.vehicle_id = Number(targetVehicleId);
+    row.driver_name = vehicleMap.get(Number(targetVehicleId))?.driver_name || row.driver_name || "";
+  }
+
+  function v651ChooseAnchorVehicle(rows, vehicles, itemMap, matcher) {
+    const counts = new Map();
+    rows.forEach(r => {
+      const area = v651GetAreaByAssignment(r, itemMap);
+      if (!matcher(area)) return;
+      counts.set(Number(r.vehicle_id), Number(counts.get(Number(r.vehicle_id)) || 0) + 1);
+    });
+    if (!counts.size) return null;
+    return [...counts.entries()]
+      .sort((a,b) => {
+        if (b[1] !== a[1]) return b[1] - a[1];
+        const aTotal = v651GetVehicleAssignments(rows, a[0]).length;
+        const bTotal = v651GetVehicleAssignments(rows, b[0]).length;
+        if (aTotal !== bTotal) return aTotal - bTotal;
+        return a[0] - b[0];
+      })[0][0];
+  }
+
+  function v651ApplyEastNearRule(rows, items, vehicles) {
+    const { itemMap, vehicleMap } = v651BuildMaps(items, vehicles);
+    const eastRows = rows.filter(r => v651IsEastNear(v651GetAreaByAssignment(r, itemMap)));
+    if (eastRows.length < 2) return rows;
+    const targetVehicleId = v651ChooseAnchorVehicle(rows, vehicles, itemMap, v651IsEastNear);
+    if (!targetVehicleId) return rows;
+
+    eastRows.forEach(r => {
+      if (Number(r.vehicle_id) === Number(targetVehicleId)) return;
+      if (!v651CanMove(rows, vehicles, r, targetVehicleId, r.item_id)) return;
+      v651MoveAssignment(rows, r.item_id, targetVehicleId, vehicleMap);
+    });
+    return rows;
+  }
+
+  function v651ApplyNortheastRule(rows, items, vehicles) {
+    const { itemMap, vehicleMap } = v651BuildMaps(items, vehicles);
+    const torideRows = rows.filter(r => v651IsToride(v651GetAreaByAssignment(r, itemMap)));
+    const ushikuRows = rows.filter(r => v651IsUshiku(v651GetAreaByAssignment(r, itemMap)));
+    const akebonoRows = rows.filter(r => v651IsAkebono(v651GetAreaByAssignment(r, itemMap)));
+
+    let targetVehicleId = v651ChooseAnchorVehicle(rows, vehicles, itemMap, v651IsToride);
+    if (!targetVehicleId) targetVehicleId = v651ChooseAnchorVehicle(rows, vehicles, itemMap, v651IsUshiku);
+    if (!targetVehicleId) return rows;
+
+    [...torideRows, ...ushikuRows].forEach(r => {
+      if (Number(r.vehicle_id) === Number(targetVehicleId)) return;
+      if (!v651CanMove(rows, vehicles, r, targetVehicleId, r.item_id)) return;
+      v651MoveAssignment(rows, r.item_id, targetVehicleId, vehicleMap);
+    });
+
+    akebonoRows.forEach(r => {
+      if (Number(r.vehicle_id) === Number(targetVehicleId)) return;
+      const currentArea = v651GetAreaByAssignment(r, itemMap);
+      if (!v651CanMove(rows, vehicles, r, targetVehicleId, r.item_id)) return;
+      const currentScore = v651GetVehicleFieldScore(rows, r.vehicle_id, currentArea, itemMap);
+      const targetScore = v651GetVehicleFieldScore(rows, targetVehicleId, currentArea, itemMap);
+      if (targetScore >= currentScore + 20) {
+        v651MoveAssignment(rows, r.item_id, targetVehicleId, vehicleMap);
       }
+    });
+
+    return rows;
+  }
+
+  function v651ApplyFieldPriorityRules(assignments, items, vehicles) {
+    const rows = Array.isArray(assignments) ? assignments.map(r => ({ ...r })) : [];
+    if (!rows.length) return rows;
+
+    v651ApplyEastNearRule(rows, items, vehicles);
+    v651ApplyNortheastRule(rows, items, vehicles);
+
+    return rows;
+  }
+
+  function v651ApplyVehicleChoiceBias(assignments, items, vehicles) {
+    const rows = Array.isArray(assignments) ? assignments.map(r => ({ ...r })) : [];
+    if (!rows.length) return rows;
+    const { itemMap, vehicleMap } = v651BuildMaps(items, vehicles);
+
+    for (let pass = 0; pass < 3; pass++) {
+      for (const row of rows) {
+        const area = v651GetAreaByAssignment(row, itemMap);
+        const currentVehicleId = Number(row.vehicle_id);
+        const currentScore = v651GetVehicleFieldScore(rows.filter(x => Number(x.item_id) !== Number(row.item_id)), currentVehicleId, area, itemMap);
+        let bestVehicleId = currentVehicleId;
+        let bestScore = currentScore;
+
+        for (const vehicle of vehicles || []) {
+          const targetVehicleId = Number(vehicle.id);
+          if (targetVehicleId === currentVehicleId) continue;
+          if (!v651CanMove(rows, vehicles, row, targetVehicleId, row.item_id)) continue;
+          const targetScore = v651GetVehicleFieldScore(rows.filter(x => Number(x.item_id) !== Number(row.item_id)), targetVehicleId, area, itemMap);
+          if (targetScore > bestScore + 120) {
+            bestScore = targetScore;
+            bestVehicleId = targetVehicleId;
+          }
+        }
+
+        if (bestVehicleId !== currentVehicleId) {
+          v651MoveAssignment(rows, row.item_id, bestVehicleId, vehicleMap);
+        }
+      }
+    }
+
+    return rows;
+  }
+
+  const _THEMIS_V651_BASE_optimizeAssignmentsByDistanceBalance = optimizeAssignmentsByDistanceBalance;
+  optimizeAssignmentsByDistanceBalance = function(assignments, items, vehicles, monthlyMap) {
+    let rows = _THEMIS_V651_BASE_optimizeAssignmentsByDistanceBalance.apply(this, arguments);
+    rows = v651ApplyFieldPriorityRules(rows, items, vehicles);
+    rows = v651ApplyVehicleChoiceBias(rows, items, vehicles);
+    return rows;
+  };
+
+  if (typeof rebundleLongDistanceDirectionalClusters === 'function') {
+    const _THEMIS_V651_BASE_rebundle = rebundleLongDistanceDirectionalClusters;
+    rebundleLongDistanceDirectionalClusters = function(assignments, items, vehicles, monthlyMap, options) {
+      let rows = _THEMIS_V651_BASE_rebundle.apply(this, arguments);
+      rows = v651ApplyFieldPriorityRules(rows, items, vehicles);
+      rows = v651ApplyVehicleChoiceBias(rows, items, vehicles);
+      return rows;
+    };
+  }
+
+  const _THEMIS_V651_BASE_applyManualLastVehicleToAssignments = applyManualLastVehicleToAssignments;
+  applyManualLastVehicleToAssignments = function(assignments, vehicles) {
+    let rows = _THEMIS_V651_BASE_applyManualLastVehicleToAssignments.apply(this, arguments);
+    const itemSource = Array.isArray(currentActualsCache) ? currentActualsCache : [];
+    rows = v651ApplyFieldPriorityRules(rows, itemSource, vehicles || []);
+    rows = v651ApplyVehicleChoiceBias(rows, itemSource, vehicles || []);
+    return rows;
+  };
+})();
+
+
+/* ===== THEMIS v6.5.2 Tokyo north-east ride-share patch ===== */
+(function(){
+  function v652NormalizeArea(area) {
+    return normalizeAreaLabel(area || "");
+  }
+
+  function v652IsTokyoNE(area) {
+    const a = v652NormalizeArea(area);
+    return ["荒川", "足立", "葛飾", "北千住", "町屋", "東尾久", "本木"].some(k => a.includes(k));
+  }
+
+  function v652BuildMaps(items, vehicles) {
+    const itemMap = new Map((items || []).map(item => [Number(item.id), item]));
+    const vehicleMap = new Map((vehicles || []).map(v => [Number(v.id), v]));
+    return { itemMap, vehicleMap };
+  }
+
+  function v652GetAreaByAssignment(assignment, itemMap) {
+    const item = itemMap.get(Number(assignment?.item_id));
+    return v652NormalizeArea(item?.destination_area || item?.cluster_area || item?.planned_area || item?.casts?.area || "");
+  }
+
+  function v652GetVehicleAssignments(rows, vehicleId) {
+    return rows.filter(r => Number(r.vehicle_id) === Number(vehicleId));
+  }
+
+  function v652GetVehicleAreas(rows, vehicleId, itemMap) {
+    return v652GetVehicleAssignments(rows, vehicleId).map(r => v652GetAreaByAssignment(r, itemMap)).filter(Boolean);
+  }
+
+  function v652GetHourLoad(rows, vehicleId, hour, excludeItemId) {
+    return rows.filter(r => Number(r.vehicle_id) === Number(vehicleId) && Number(r.actual_hour) === Number(hour) && Number(r.item_id) !== Number(excludeItemId || -1)).length;
+  }
+
+  function v652CanMove(rows, vehicles, assignment, targetVehicleId, excludeItemId) {
+    const vehicle = (vehicles || []).find(v => Number(v.id) === Number(targetVehicleId));
+    if (!vehicle) return false;
+    const hour = Number(assignment?.actual_hour || 0);
+    const load = v652GetHourLoad(rows, targetVehicleId, hour, excludeItemId);
+    return load < Number(vehicle.seat_capacity || 4);
+  }
+
+  function v652MoveAssignment(rows, itemId, targetVehicleId, vehicleMap) {
+    const row = rows.find(r => Number(r.item_id) === Number(itemId));
+    if (!row) return;
+    row.vehicle_id = Number(targetVehicleId);
+    row.driver_name = vehicleMap.get(Number(targetVehicleId))?.driver_name || row.driver_name || "";
+  }
+
+  function v652GetVehicleTokyoScore(rows, vehicleId, targetArea, itemMap) {
+    const areas = v652GetVehicleAreas(rows, vehicleId, itemMap);
+    if (!areas.length) return 0;
+    let score = 0;
+    for (const area of areas) {
+      if (v652IsTokyoNE(targetArea) && v652IsTokyoNE(area)) score += 120;
     }
     return score;
   }
 
-  function v6412HourTotalScore(rows, hour, vehicleIds) {
-    return vehicleIds.reduce((sum, vehicleId) => sum + v6412VehicleHourScore(rows, vehicleId, hour), 0);
-  }
-
-  function v6412CountByVehicle(rows, hour) {
-    const map = new Map();
-    rows.filter(r => Number(r?.actual_hour ?? 0) === Number(hour)).forEach(r => {
-      const vid = Number(r?.vehicle_id || 0);
-      map.set(vid, Number(map.get(vid) || 0) + 1);
+  function v652ChooseTokyoAnchor(rows, itemMap) {
+    const counts = new Map();
+    rows.forEach(r => {
+      const area = v652GetAreaByAssignment(r, itemMap);
+      if (!v652IsTokyoNE(area)) return;
+      counts.set(Number(r.vehicle_id), Number(counts.get(Number(r.vehicle_id)) || 0) + 1);
     });
-    return map;
+    if (!counts.size) return null;
+    return [...counts.entries()].sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1];
+      return a[0] - b[0];
+    })[0][0];
   }
 
-  function v6412HasNoIdleVehicles(rows, hour, vehicles) {
-    const hourRows = rows.filter(r => Number(r?.actual_hour ?? 0) === Number(hour));
-    const activeVehicleIds = [...new Set(hourRows.map(r => Number(r?.vehicle_id || 0)).filter(Boolean))];
-    const selectedVehicleIds = (vehicles || []).map(v => Number(v.id || 0)).filter(Boolean);
-    if (!hourRows.length || !selectedVehicleIds.length) return false;
-    return activeVehicleIds.length >= selectedVehicleIds.length;
+  function v652ApplyTokyoNERule(assignments, items, vehicles) {
+    const rows = Array.isArray(assignments) ? assignments.map(r => ({ ...r })) : [];
+    if (!rows.length) return rows;
+    const { itemMap, vehicleMap } = v652BuildMaps(items, vehicles);
+    const tokyoRows = rows.filter(r => v652IsTokyoNE(v652GetAreaByAssignment(r, itemMap)));
+    if (tokyoRows.length < 2) return rows;
+
+    const targetVehicleId = v652ChooseTokyoAnchor(rows, itemMap);
+    if (!targetVehicleId) return rows;
+
+    tokyoRows.forEach(r => {
+      if (Number(r.vehicle_id) === Number(targetVehicleId)) return;
+      if (!v652CanMove(rows, vehicles, r, targetVehicleId, r.item_id)) return;
+      const currentArea = v652GetAreaByAssignment(r, itemMap);
+      const currentScore = v652GetVehicleTokyoScore(rows.filter(x => Number(x.item_id) !== Number(r.item_id)), r.vehicle_id, currentArea, itemMap);
+      const targetScore = v652GetVehicleTokyoScore(rows.filter(x => Number(x.item_id) !== Number(r.item_id)), targetVehicleId, currentArea, itemMap);
+      if (targetScore >= currentScore + 80) {
+        v652MoveAssignment(rows, r.item_id, targetVehicleId, vehicleMap);
+      }
+    });
+
+    return rows;
   }
 
-  function v6412CanMoveRow(row, toVehicleId, rows, vehicles, lockedItemIds) {
-    if (lockedItemIds.has(Number(row?.item_id || row?.id || 0))) return false;
-    const targetVehicle = (vehicles || []).find(v => Number(v.id || 0) === Number(toVehicleId));
-    if (!targetVehicle) return false;
-    const hour = Number(row?.actual_hour ?? 0);
-    const counts = v6412CountByVehicle(rows, hour);
-    const cap = Number(targetVehicle.seat_capacity || 4);
-    if (Number(counts.get(Number(toVehicleId)) || 0) >= cap) return false;
+  function v652ApplyTokyoChoiceBias(assignments, items, vehicles) {
+    const rows = Array.isArray(assignments) ? assignments.map(r => ({ ...r })) : [];
+    if (!rows.length) return rows;
+    const { itemMap, vehicleMap } = v652BuildMaps(items, vehicles);
 
-    const rowArea = v6412NormArea(row);
-    const existing = rows.filter(r => Number(r?.vehicle_id || 0) === Number(toVehicleId) && Number(r?.actual_hour ?? 0) === hour);
-    if (!existing.length) return false; // no-idle phase only rebundle into already used vehicles
-    const hardReverse = existing.some(r => Number(getDirectionAffinityScore(rowArea, v6412NormArea(r)) || 0) <= -35);
-    if (hardReverse) return false;
-    return true;
-  }
+    for (let pass = 0; pass < 2; pass++) {
+      for (const row of rows) {
+        const area = v652GetAreaByAssignment(row, itemMap);
+        if (!v652IsTokyoNE(area)) continue;
+        const currentVehicleId = Number(row.vehicle_id);
+        const baseRows = rows.filter(x => Number(x.item_id) !== Number(row.item_id));
+        const currentScore = v652GetVehicleTokyoScore(baseRows, currentVehicleId, area, itemMap);
+        let bestVehicleId = currentVehicleId;
+        let bestScore = currentScore;
 
-  function v6412RebundleNoIdle(rows, items, vehicles) {
-    let working = Array.isArray(rows) ? rows.map(r => ({ ...r })) : [];
-    if (!working.length) return working;
-
-    const lockedItemIds = new Set();
-    try {
-      buildLockedBundleAssignmentIdSet(working, items, 55).forEach(id => lockedItemIds.add(Number(id)));
-    } catch (e) {}
-
-    const hours = [...new Set(working.map(r => Number(r?.actual_hour ?? 0)).filter(h => Number.isFinite(h)))].sort((a,b) => a-b);
-    for (const hour of hours) {
-      if (!v6412HasNoIdleVehicles(working, hour, vehicles)) continue;
-      const hourRows = working.filter(r => Number(r?.actual_hour ?? 0) === hour);
-      const vehicleIds = [...new Set(hourRows.map(r => Number(r?.vehicle_id || 0)).filter(Boolean))];
-      if (vehicleIds.length <= 1) continue;
-
-      let improved = true;
-      let guard = 0;
-      while (improved && guard < 24) {
-        guard += 1;
-        improved = false;
-        const baseScore = v6412HourTotalScore(working, hour, vehicleIds);
-        let bestMove = null;
-
-        const freshHourRows = working.filter(r => Number(r?.actual_hour ?? 0) === hour);
-        for (const row of freshHourRows) {
-          const fromVehicleId = Number(row?.vehicle_id || 0);
-          if (!fromVehicleId) continue;
-          const fromCount = freshHourRows.filter(r => Number(r?.vehicle_id || 0) === fromVehicleId).length;
-          if (fromCount <= 1) continue; // do not empty a vehicle in no-idle rebundle
-
-          for (const toVehicleId of vehicleIds) {
-            if (Number(toVehicleId) === fromVehicleId) continue;
-            if (!v6412CanMoveRow(row, toVehicleId, working, vehicles, lockedItemIds)) continue;
-
-            const simulated = working.map(r => Number(r?.id || 0) === Number(row?.id || 0) ? { ...r, vehicle_id: Number(toVehicleId) } : r);
-            const nextScore = v6412HourTotalScore(simulated, hour, vehicleIds);
-            const gain = nextScore - baseScore;
-            if (gain > 120 && (!bestMove || gain > bestMove.gain)) {
-              bestMove = { rowId: Number(row?.id || 0), toVehicleId: Number(toVehicleId), gain };
-            }
+        for (const vehicle of vehicles || []) {
+          const targetVehicleId = Number(vehicle.id);
+          if (targetVehicleId === currentVehicleId) continue;
+          if (!v652CanMove(rows, vehicles, row, targetVehicleId, row.item_id)) continue;
+          const targetScore = v652GetVehicleTokyoScore(baseRows, targetVehicleId, area, itemMap);
+          if (targetScore > bestScore + 60) {
+            bestScore = targetScore;
+            bestVehicleId = targetVehicleId;
           }
         }
 
-        if (bestMove) {
-          working = working.map(r => Number(r?.id || 0) === bestMove.rowId ? { ...r, vehicle_id: bestMove.toVehicleId } : r);
-          improved = true;
+        if (bestVehicleId !== currentVehicleId) {
+          v652MoveAssignment(rows, row.item_id, bestVehicleId, vehicleMap);
         }
       }
     }
-    return working;
+
+    return rows;
   }
 
-  optimizeAssignments = function(items, vehicles, monthlyMap) {
-    let rows = _THEMIS_V6412_BASE_optimizeAssignments.apply(this, arguments);
-    rows = v6412RebundleNoIdle(rows, items, vehicles);
+  const _THEMIS_V652_BASE_optimizeAssignmentsByDistanceBalance = optimizeAssignmentsByDistanceBalance;
+  optimizeAssignmentsByDistanceBalance = function(assignments, items, vehicles, monthlyMap) {
+    let rows = _THEMIS_V652_BASE_optimizeAssignmentsByDistanceBalance.apply(this, arguments);
+    rows = v652ApplyTokyoNERule(rows, items, vehicles);
+    rows = v652ApplyTokyoChoiceBias(rows, items, vehicles);
+    return rows;
+  };
+
+  if (typeof rebundleLongDistanceDirectionalClusters === 'function') {
+    const _THEMIS_V652_BASE_rebundle = rebundleLongDistanceDirectionalClusters;
+    rebundleLongDistanceDirectionalClusters = function(assignments, items, vehicles, monthlyMap, options) {
+      let rows = _THEMIS_V652_BASE_rebundle.apply(this, arguments);
+      rows = v652ApplyTokyoNERule(rows, items, vehicles);
+      rows = v652ApplyTokyoChoiceBias(rows, items, vehicles);
+      return rows;
+    };
+  }
+
+  const _THEMIS_V652_BASE_applyManualLastVehicleToAssignments = applyManualLastVehicleToAssignments;
+  applyManualLastVehicleToAssignments = function(assignments, vehicles) {
+    let rows = _THEMIS_V652_BASE_applyManualLastVehicleToAssignments.apply(this, arguments);
+    const itemSource = Array.isArray(currentActualsCache) ? currentActualsCache : [];
+    rows = v652ApplyTokyoNERule(rows, itemSource, vehicles || []);
+    rows = v652ApplyTokyoChoiceBias(rows, itemSource, vehicles || []);
     return rows;
   };
 })();
-/* ===== THEMIS v6.4.12 no-idle rebundle patch end ===== */
