@@ -4310,6 +4310,49 @@ function renderPlanGroupedTable() {
   });
 }
 
+
+function getMatrixLegendHtml() {
+  return `
+    <div class="matrix-legend" aria-label="色の説明">
+      <span class="matrix-legend-item"><span class="matrix-dot pending"></span>黄色 = 未完了</span>
+      <span class="matrix-legend-item"><span class="matrix-dot done"></span>緑 = 完了</span>
+      <span class="matrix-legend-item"><span class="matrix-dot cancel"></span>赤 = キャンセル</span>
+    </div>
+  `;
+}
+
+function getPlanLinkedActualStatus(planRow) {
+  const linked = currentActualsCache.find(
+    item =>
+      Number(item.cast_id) === Number(planRow.cast_id) &&
+      (item.actual_date || els.actualDate?.value || todayStr()) === (planRow.plan_date || els.planDate?.value || todayStr()) &&
+      Number(item.actual_hour ?? -1) === Number(planRow.plan_hour ?? -1)
+  );
+  if (linked) return normalizeStatus(linked.status);
+  return normalizeStatus(planRow.status);
+}
+
+function buildMatrixMetaText(distanceKm, travelMinutes) {
+  const parts = [];
+  const distance = Number(distanceKm || 0);
+  const minutes = Number(travelMinutes || 0);
+  if (Number.isFinite(distance) && distance > 0) parts.push(`${distance.toFixed(1)}km`);
+  if (Number.isFinite(minutes) && minutes > 0) parts.push(`片道${minutes}分`);
+  return parts.length ? ` (${parts.join(" / ")})` : "";
+}
+
+function buildMatrixNameLine(row, status, addressKey = "destination_address") {
+  const nameHtml = buildMapLinkHtml({
+    name: row.casts?.name,
+    address: row[addressKey] || row.casts?.address,
+    lat: row.casts?.latitude,
+    lng: row.casts?.longitude,
+    className: `map-name-link matrix-name status-${status}`
+  });
+  const metaText = buildMatrixMetaText(row.distance_km, row.casts?.travel_minutes || row.travel_minutes);
+  return `<span class="matrix-line">${nameHtml}<span class="matrix-meta">${escapeHtml(metaText)}</span></span>`;
+}
+
 function renderPlansTimeAreaMatrix() {
   if (!els.plansTimeAreaMatrix) return;
 
@@ -4327,6 +4370,7 @@ function renderPlansTimeAreaMatrix() {
   }
 
   let html = `
+    ${getMatrixLegendHtml()}
     <table class="matrix-table">
       <thead>
         <tr>
@@ -4350,25 +4394,17 @@ function renderPlansTimeAreaMatrix() {
       if (!rows.length) {
         html += `<td>-</td>`;
       } else {
-        const totalDistance = rows.reduce(
-          (sum, row) => sum + Number(row.distance_km || 0),
-          0
-        );
-
         html += `
           <td>
             <div class="matrix-card">
-              ${rows.map(row => `
-                <div class="matrix-item">
-                  <span class="matrix-name ${normalizeStatus(row.status)}">${buildMapLinkHtml({
-                   name: row.casts?.name,
-                   address: row.destination_address || row.casts?.address,
-                   lat: row.casts?.latitude,
-                   lng: row.casts?.longitude
-                  })}</span>
-                  <span class="matrix-meta">(${Number(row.distance_km || 0).toFixed(1)}km${row.casts?.travel_minutes ? ` / 片道${Number(row.casts.travel_minutes)}分` : ""})</span>
-                </div>
-              `).join("")}
+              ${rows.map(row => {
+                const linkedStatus = getPlanLinkedActualStatus(row);
+                return `
+                  <div class="matrix-item">
+                    ${buildMatrixNameLine(row, linkedStatus, "destination_address")}
+                  </div>
+                `;
+              }).join("")}
             </div>
           </td>
         `;
@@ -4693,7 +4729,7 @@ async function updateActualStatus(itemId, status) {
   if (targetPlan) {
     let nextPlanStatus = targetPlan.status;
     if (status === "done") nextPlanStatus = "done";
-    else if (status === "cancel") nextPlanStatus = "planned";
+    else if (status === "cancel") nextPlanStatus = "cancel";
     else if (status === "pending") nextPlanStatus = "assigned";
 
     const { error: planError } = await supabaseClient
@@ -4869,6 +4905,7 @@ function renderActualTimeAreaMatrix() {
   }
 
   let html = `
+    ${getMatrixLegendHtml()}
     <table class="matrix-table">
       <thead>
         <tr>
@@ -4892,26 +4929,14 @@ function renderActualTimeAreaMatrix() {
       if (!rows.length) {
         html += `<td>-</td>`;
       } else {
-        const totalDistance = rows.reduce((sum, row) => sum + Number(row.distance_km || 0), 0);
-
         html += `
           <td>
             <div class="matrix-card">
-              ${rows
-                .map(
-                  row => `
-                    <div class="matrix-item">
-                      <span class="matrix-name ${normalizeStatus(row.status)}">${buildMapLinkHtml({
-                      name: row.casts?.name,
-                      address: row.destination_address || row.casts?.address,
-                      lat: row.casts?.latitude,
-                      lng: row.casts?.longitude
-                      })}</span>
-                      <span class="matrix-meta">(${Number(row.distance_km || 0).toFixed(1)}km${row.casts?.travel_minutes ? ` / 片道${Number(row.casts.travel_minutes)}分` : ""})</span>
-                    </div>
-                  `
-                )
-                .join("")}
+              ${rows.map(row => `
+                <div class="matrix-item">
+                  ${buildMatrixNameLine(row, normalizeStatus(row.status), "destination_address")}
+                </div>
+              `).join("")}
             </div>
           </td>
         `;
