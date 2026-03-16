@@ -521,20 +521,6 @@ function getCastTravelMinutesValue(castLike) {
   return getStoredTravelMinutes(castLike.travel_minutes || castLike.travelMinutes);
 }
 
-function formatPlanDistanceTravel(distanceKm, travelMinutes) {
-  const parts = [];
-  const distance = Number(distanceKm);
-  const minutes = getStoredTravelMinutes(travelMinutes);
-
-  if (Number.isFinite(distance) && distance > 0) {
-    parts.push(`${distance.toFixed(1)}km`);
-  }
-  if (minutes > 0) {
-    parts.push(`片道${minutes}分`);
-  }
-  return parts.join(' / ');
-}
-
 async function getGoogleDrivingDurationMinutesFromOrigin(address, lat, lng) {
   const cacheKey = makeRouteDistanceCacheKey(address, lat, lng);
   if (!cacheKey || cacheKey === 'addr:') return null;
@@ -4217,18 +4203,6 @@ async function savePlan() {
     status: "planned"
   };
 
-  const duplicatePlan = currentPlansCache.find(plan =>
-    plan.plan_date === planDate &&
-    Number(plan.cast_id || 0) === castId &&
-    Number(plan.id || 0) !== Number(editingPlanId || 0) &&
-    normalizeStatus(plan.status) !== "cancel"
-  );
-
-  if (duplicatePlan) {
-    alert(`${cast.name || 'このキャスト'} はすでに予定に入っています`);
-    return;
-  }
-
   let error;
   if (editingPlanId) {
     ({ error } = await supabaseClient.from("dispatch_plans").update(payload).eq("id", editingPlanId));
@@ -4302,7 +4276,7 @@ function renderPlanGroupedTable() {
              lng: plan.casts?.longitude
              })}</strong></div>
              <div>${escapeHtml(normalizeAreaLabel(plan.planned_area || "無し"))}</div>
-             <div>${escapeHtml(formatPlanDistanceTravel(plan.distance_km, plan.casts?.travel_minutes || plan.travel_minutes))}</div>
+             <div>${plan.distance_km ?? ""}</div>
              <div class="op-cell">
               <span class="badge-status ${normalizeStatus(plan.status)}">${escapeHtml(getStatusText(plan.status))}</span>
               <button class="btn ghost plan-edit-btn" data-id="${plan.id}">編集</button>
@@ -4376,25 +4350,25 @@ function renderPlansTimeAreaMatrix() {
       if (!rows.length) {
         html += `<td>-</td>`;
       } else {
+        const totalDistance = rows.reduce(
+          (sum, row) => sum + Number(row.distance_km || 0),
+          0
+        );
+
         html += `
           <td>
             <div class="matrix-card">
-              ${rows.map(row => {
-                const detailText = formatPlanDistanceTravel(
-                  row.distance_km,
-                  row.casts?.travel_minutes || row.travel_minutes
-                );
-                return `
+              ${rows.map(row => `
                 <div class="matrix-item">
-                  <span class="badge-status ${normalizeStatus(row.status)}">${escapeHtml(getStatusText(row.status))}</span>
-                  <span>${buildMapLinkHtml({
+                  <span class="matrix-name ${normalizeStatus(row.status)}">${buildMapLinkHtml({
                    name: row.casts?.name,
                    address: row.destination_address || row.casts?.address,
                    lat: row.casts?.latitude,
                    lng: row.casts?.longitude
-                  })}${detailText ? ` (${escapeHtml(detailText)})` : ""}</span>
+                  })}</span>
+                  <span class="matrix-meta">(${Number(row.distance_km || 0).toFixed(1)}km${row.casts?.travel_minutes ? ` / 片道${Number(row.casts.travel_minutes)}分` : ""})</span>
                 </div>
-              `}).join("")}
+              `).join("")}
             </div>
           </td>
         `;
@@ -4923,18 +4897,17 @@ function renderActualTimeAreaMatrix() {
         html += `
           <td>
             <div class="matrix-card">
-              <div class="matrix-summary">${rows.length}人 / ${totalDistance.toFixed(1)}km</div>
               ${rows
                 .map(
                   row => `
                     <div class="matrix-item">
-                      <span class="badge-status ${normalizeStatus(row.status)}">${escapeHtml(getStatusText(row.status))}</span>
-                      <span>${buildMapLinkHtml({
+                      <span class="matrix-name ${normalizeStatus(row.status)}">${buildMapLinkHtml({
                       name: row.casts?.name,
                       address: row.destination_address || row.casts?.address,
                       lat: row.casts?.latitude,
                       lng: row.casts?.longitude
-                      })} (${Number(row.distance_km || 0).toFixed(1)}km)</span>
+                      })}</span>
+                      <span class="matrix-meta">(${Number(row.distance_km || 0).toFixed(1)}km${row.casts?.travel_minutes ? ` / 片道${Number(row.casts.travel_minutes)}分` : ""})</span>
                     </div>
                   `
                 )
