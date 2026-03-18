@@ -1883,3 +1883,57 @@ img, table, input, select, textarea, button{
     font-size:12px;
   }
 }
+
+
+/* mileage month matrix */
+.mileage-report-grid{
+  display:grid;
+  gap:16px;
+}
+
+.mileage-matrix-section{
+  display:grid;
+  gap:10px;
+}
+
+.mileage-matrix-wrap{
+  margin-top:0;
+}
+
+.mileage-matrix-table{
+  min-width:1200px;
+}
+
+.mileage-matrix-table th,
+.mileage-matrix-table td{
+  white-space:nowrap;
+  text-align:center;
+}
+
+.mileage-matrix-table th:first-child,
+.mileage-matrix-table td:first-child{
+  text-align:left;
+  position:sticky;
+  left:0;
+  z-index:1;
+  background:#101722;
+}
+
+.mileage-matrix-table thead th:first-child{
+  z-index:2;
+}
+
+.mileage-driver-cell{
+  min-width:120px;
+  font-weight:800;
+}
+
+.mileage-day-cell{
+  color:#dce5f4;
+}
+
+@media (max-width: 900px){
+  .mileage-matrix-table{
+    min-width:980px;
+  }
+}
