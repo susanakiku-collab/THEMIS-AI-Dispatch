@@ -42,6 +42,8 @@ let activeVehicleIdsForToday = new Set();
 let lastAutoDispatchRunAtMinutes = null;
 let simulationSlotHour = null;
 let lastSimulationResult = null;
+let isRefreshingHybridUI = false;
+let suppressSimulationSlotChange = false;
 
 const els = {
   plansTimeAreaMatrix: document.getElementById("plansTimeAreaMatrix"),
@@ -125,18 +127,18 @@ const els = {
   clearManualLastVehicleBtn: document.getElementById("clearManualLastVehicleBtn"),
   dailyVehicleChecklist: document.getElementById("dailyVehicleChecklist"),
   manualLastVehicleInfo: document.getElementById("manualLastVehicleInfo"),
-  operationContextSummary: document.getElementById("operationContextSummary"),
-  operationDiagnosis: document.getElementById("operationDiagnosis"),
-  simulationSlotSelect: document.getElementById("simulationSlotSelect"),
-  simulationIncludeInflow: document.getElementById("simulationIncludeInflow"),
-  runSimulationBtn: document.getElementById("runSimulationBtn"),
-  runSimulationDispatchBtn: document.getElementById("runSimulationDispatchBtn"),
-  simulationDiagnosis: document.getElementById("simulationDiagnosis"),
-  simulationPreview: document.getElementById("simulationPreview"),
   dailyMileageInputs: document.getElementById("dailyMileageInputs"),
   saveDailyMileageBtn: document.getElementById("saveDailyMileageBtn"),
   copyResultBtn: document.getElementById("copyResultBtn"),
   dailyDispatchResult: document.getElementById("dailyDispatchResult"),
+  operationContextSummary: document.getElementById("operationContextSummary"),
+  operationDiagnosis: document.getElementById("operationDiagnosis"),
+  simulationSlotSelect: document.getElementById("simulationSlotSelect"),
+  simulationIncludePlanInflow: document.getElementById("simulationIncludePlanInflow"),
+  runSimulationBtn: document.getElementById("runSimulationBtn"),
+  runSimulationDispatchBtn: document.getElementById("runSimulationDispatchBtn"),
+  simulationDiagnosis: document.getElementById("simulationDiagnosis"),
+  simulationPreview: document.getElementById("simulationPreview"),
 
   planDate: document.getElementById("planDate"),
   exportPlansCsvBtn: document.getElementById("exportPlansCsvBtn"),
@@ -364,6 +366,495 @@ function getDayOfWeek(dateStr) {
   // 火曜-金曜は4時、土曜-月曜は5時
   if (day >= 2 && day <= 5) return 4;
   return 5;
+}
+
+
+function getUnifiedHourSet() {
+  const set = new Set();
+  (Array.isArray(currentPlansCache) ? currentPlansCache : []).forEach(row => {
+    const hour = Number(row?.plan_hour ?? row?.actual_hour);
+    if (Number.isFinite(hour)) set.add(hour);
+  });
+  (Array.isArray(currentActualsCache) ? currentActualsCache : []).forEach(row => {
+    const status = normalizeStatus(row?.status);
+    if (status === "cancel") return;
+    const hour = Number(row?.actual_hour ?? row?.plan_hour);
+    if (Number.isFinite(hour)) set.add(hour);
+  });
+  if (!set.size) set.add(getDefaultLastHour(els.dispatchDate?.value || todayStr()));
+  return [...set].sort((a, b) => a - b);
+}
+
+function getOperationBaseHour() {
+  const activeHours = (Array.isArray(currentActualsCache) ? currentActualsCache : [])
+    .filter(row => {
+      const status = normalizeStatus(row?.status);
+      return status !== "done" && status !== "cancel";
+    })
+    .map(row => Number(row?.actual_hour ?? row?.plan_hour))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+
+  if (activeHours.length) return activeHours[0];
+
+  const plannedHours = (Array.isArray(currentPlansCache) ? currentPlansCache : [])
+    .map(row => Number(row?.plan_hour ?? row?.actual_hour))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+
+  if (plannedHours.length) return plannedHours[0];
+  return getDefaultLastHour(els.dispatchDate?.value || todayStr());
+}
+
+function getNextHourSlot(baseHour) {
+  const hours = getUnifiedHourSet();
+  const found = hours.find(hour => Number(hour) > Number(baseHour));
+  return Number.isFinite(found) ? found : null;
+}
+
+function getLastHourSlot() {
+  const hours = getUnifiedHourSet();
+  return hours.length ? hours[hours.length - 1] : getDefaultLastHour(els.dispatchDate?.value || todayStr());
+}
+
+function parseClockTextToMinutes(value) {
+  if (!value || value === "-") return null;
+  const m = String(value).match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+function buildProjectedRowsForHour(targetHour) {
+  const hour = Number(targetHour);
+  const actualRows = (Array.isArray(currentActualsCache) ? currentActualsCache : [])
+    .filter(row => Number(row?.actual_hour ?? row?.plan_hour) === hour)
+    .filter(row => {
+      const status = normalizeStatus(row?.status);
+      return status !== "done" && status !== "cancel";
+    });
+
+  const actualPlanIds = new Set(actualRows.map(row => Number(row?.plan_id || 0)).filter(Boolean));
+  const actualCastKeys = new Set(actualRows.map(row => `${Number(row?.cast_id || 0)}:${hour}`));
+  const doneOrCancelPlanIds = new Set(
+    (Array.isArray(currentActualsCache) ? currentActualsCache : [])
+      .filter(row => Number(row?.actual_hour ?? row?.plan_hour) === hour)
+      .filter(row => {
+        const status = normalizeStatus(row?.status);
+        return status === "done" || status === "cancel";
+      })
+      .map(row => Number(row?.plan_id || 0))
+      .filter(Boolean)
+  );
+
+  const planRows = (Array.isArray(currentPlansCache) ? currentPlansCache : [])
+    .filter(plan => Number(plan?.plan_hour ?? -1) === hour)
+    .filter(plan => !actualPlanIds.has(Number(plan?.id || 0)))
+    .filter(plan => !doneOrCancelPlanIds.has(Number(plan?.id || 0)))
+    .filter(plan => !actualCastKeys.has(`${Number(plan?.cast_id || 0)}:${hour}`))
+    .map((plan, index) => ({
+      id: -100000 - index - Number(plan?.id || 0),
+      plan_id: Number(plan?.id || 0),
+      cast_id: Number(plan?.cast_id || 0),
+      actual_hour: hour,
+      plan_hour: hour,
+      status: "pending",
+      distance_km: Number(plan?.distance_km || plan?.casts?.distance_km || 0),
+      destination_area: plan?.planned_area || plan?.casts?.area || "",
+      destination_address: plan?.destination_address || plan?.casts?.address || "",
+      note: plan?.note || "",
+      casts: {
+        ...(plan?.casts || {}),
+        area: plan?.planned_area || plan?.casts?.area || "",
+        address: plan?.destination_address || plan?.casts?.address || "",
+        distance_km: Number(plan?.distance_km || plan?.casts?.distance_km || 0),
+        travel_minutes: Number(plan?.casts?.travel_minutes || 0),
+      },
+      simulated_from_plan: true
+    }));
+
+  return [...actualRows, ...planRows];
+}
+
+function getEffectiveVehiclesForHour(targetHour) {
+  const slotMinutes = Number(targetHour) * 60;
+  const vehicles = Array.isArray(getSelectedVehiclesForToday()) ? getSelectedVehiclesForToday().filter(Boolean) : [];
+  const activeItems = (Array.isArray(currentActualsCache) ? currentActualsCache : []).filter(row => {
+    const status = normalizeStatus(row?.status);
+    return status !== "done" && status !== "cancel";
+  });
+
+  return vehicles.filter(vehicle => {
+    const rows = activeItems.filter(item => Number(item?.vehicle_id || 0) === Number(vehicle.id));
+    if (!rows.length) return true;
+    const orderedRows = moveManualLastItemsToEnd(sortItemsByNearestRoute(rows));
+    const forecast = getVehicleRotationForecastSafe(vehicle, orderedRows);
+    const readyMinutes = parseClockTextToMinutes(forecast?.predictedReadyTime);
+    if (readyMinutes === null) return true;
+    return readyMinutes <= slotMinutes;
+  });
+}
+
+function getVehicleDeadNamesForHour(targetHour) {
+  const slotMinutes = Number(targetHour) * 60;
+  const vehicles = Array.isArray(getSelectedVehiclesForToday()) ? getSelectedVehiclesForToday().filter(Boolean) : [];
+  const activeItems = (Array.isArray(currentActualsCache) ? currentActualsCache : []).filter(row => {
+    const status = normalizeStatus(row?.status);
+    return status !== "done" && status !== "cancel";
+  });
+
+  return vehicles.filter(vehicle => {
+    const rows = activeItems.filter(item => Number(item?.vehicle_id || 0) === Number(vehicle.id));
+    if (!rows.length) return false;
+    const orderedRows = moveManualLastItemsToEnd(sortItemsByNearestRoute(rows));
+    const forecast = getVehicleRotationForecastSafe(vehicle, orderedRows);
+    const readyMinutes = parseClockTextToMinutes(forecast?.predictedReadyTime);
+    return readyMinutes !== null && readyMinutes > slotMinutes;
+  }).map(vehicle => vehicle?.driver_name || vehicle?.plate_number || `車両${vehicle.id}`);
+}
+
+function buildSimulationRowsForHour(targetHour, options = {}) {
+  const hour = Number(targetHour);
+  const includePlanInflow = Boolean(options.includePlanInflow);
+  const actualRows = Array.isArray(currentActualsCache) ? currentActualsCache : [];
+  const plans = Array.isArray(currentPlansCache) ? currentPlansCache : [];
+
+  const actualPlanIds = new Set();
+  const actualCastHourKeys = new Set();
+  actualRows.forEach(row => {
+    const planId = Number(row?.plan_id || 0);
+    const castId = Number(row?.cast_id || 0);
+    const actualHour = Number(row?.actual_hour ?? row?.plan_hour);
+    if (planId) actualPlanIds.add(planId);
+    if (castId && Number.isFinite(actualHour)) actualCastHourKeys.add(`${castId}:${actualHour}`);
+  });
+
+  const isOpenPlan = (plan) => {
+    const status = String(plan?.status || '').toLowerCase();
+    return status !== 'done' && status !== 'cancel';
+  };
+
+  const toSimRow = (plan, index, sourceType) => ({
+    id: -700000 - index - Number(plan?.id || 0),
+    plan_id: Number(plan?.id || 0),
+    cast_id: Number(plan?.cast_id || 0),
+    actual_hour: hour,
+    plan_hour: Number(plan?.plan_hour ?? hour),
+    status: 'pending',
+    distance_km: Number(plan?.distance_km || plan?.casts?.distance_km || 0),
+    destination_area: plan?.planned_area || plan?.casts?.area || '',
+    destination_address: plan?.destination_address || plan?.casts?.address || '',
+    note: plan?.note || '',
+    simulation_source: sourceType,
+    casts: {
+      ...(plan?.casts || {}),
+      area: plan?.planned_area || plan?.casts?.area || '',
+      address: plan?.destination_address || plan?.casts?.address || '',
+      distance_km: Number(plan?.distance_km || plan?.casts?.distance_km || 0),
+      travel_minutes: Number(plan?.casts?.travel_minutes || 0),
+    }
+  });
+
+  const selectedPlans = plans
+    .filter(plan => Number(plan?.plan_hour ?? -1) === hour)
+    .filter(isOpenPlan)
+    .filter(plan => !actualPlanIds.has(Number(plan?.id || 0)))
+    .filter(plan => !actualCastHourKeys.has(`${Number(plan?.cast_id || 0)}:${hour}`));
+
+  const inflowPlans = includePlanInflow
+    ? plans
+        .filter(plan => Number(plan?.plan_hour ?? -1) < hour)
+        .filter(isOpenPlan)
+        .filter(plan => !actualPlanIds.has(Number(plan?.id || 0)))
+    : [];
+
+  const merged = [];
+  const seenPlanIds = new Set();
+  const seenCastIds = new Set();
+
+  [...selectedPlans, ...inflowPlans].forEach(plan => {
+    const planId = Number(plan?.id || 0);
+    const castId = Number(plan?.cast_id || 0);
+    if (planId && seenPlanIds.has(planId)) return;
+    if (castId && seenCastIds.has(castId)) return;
+    if (planId) seenPlanIds.add(planId);
+    if (castId) seenCastIds.add(castId);
+    merged.push(toSimRow(plan, merged.length, Number(plan?.plan_hour ?? hour) < hour ? 'plan_inflow' : 'slot_plan'));
+  });
+
+  const summary = {
+    slotPlanCount: selectedPlans.length,
+    inflowPlanCount: inflowPlans.filter(plan => {
+      const planId = Number(plan?.id || 0);
+      const castId = Number(plan?.cast_id || 0);
+      return (!planId || seenPlanIds.has(planId)) && (!castId || seenCastIds.has(castId));
+    }).length
+  };
+
+  return { rows: merged, summary };
+}
+
+function diagnoseSimulationHourWindow(targetHour, options = {}) {
+  const built = buildSimulationRowsForHour(targetHour, options);
+  const rows = built.rows;
+  const vehicles = getEffectiveVehiclesForHour(targetHour);
+  const effectiveVehicleCount = vehicles.length;
+  const totalCapacity = vehicles.reduce((sum, vehicle) => sum + Math.max(1, Number(vehicle?.seat_capacity || 4)), 0);
+  const castCount = rows.length;
+  const areaGroups = new Set(rows.map(row => getAreaDisplayGroup(normalizeAreaLabel(row?.destination_area || row?.planned_area || row?.casts?.area || "無し"))));
+  const shortageCount = Math.max(0, castCount - totalCapacity);
+  let statusKey = "ok";
+  let statusText = "OK";
+  if (totalCapacity < castCount) {
+    statusKey = "danger";
+    statusText = "定員オーバー見込み";
+  } else if (areaGroups.size > effectiveVehicleCount && castCount > 0) {
+    statusKey = "warn";
+    statusText = "車両不足見込み";
+  }
+  return {
+    hour: Number(targetHour),
+    rows,
+    vehicles,
+    castCount,
+    effectiveVehicleCount,
+    totalCapacity,
+    areaGroupCount: areaGroups.size,
+    shortageCount,
+    statusKey,
+    statusText,
+    deadVehicleNames: getVehicleDeadNamesForHour(targetHour),
+    slotPlanCount: built.summary.slotPlanCount,
+    inflowPlanCount: built.summary.inflowPlanCount
+  };
+}
+
+function diagnoseHourWindow(targetHour) {
+  const rows = buildProjectedRowsForHour(targetHour);
+  const vehicles = getEffectiveVehiclesForHour(targetHour);
+  const effectiveVehicleCount = vehicles.length;
+  const totalCapacity = vehicles.reduce((sum, vehicle) => sum + Math.max(1, Number(vehicle?.seat_capacity || 4)), 0);
+  const castCount = rows.length;
+  const areaGroups = new Set(rows.map(row => getAreaDisplayGroup(normalizeAreaLabel(row?.destination_area || row?.planned_area || row?.casts?.area || "無し"))));
+  const shortageCount = Math.max(0, castCount - totalCapacity);
+  let statusKey = "ok";
+  let statusText = "OK";
+  if (totalCapacity < castCount) {
+    statusKey = "danger";
+    statusText = "定員オーバー見込み";
+  } else if (areaGroups.size > effectiveVehicleCount && castCount > 0) {
+    statusKey = "warn";
+    statusText = "車両不足見込み";
+  }
+  return {
+    hour: Number(targetHour),
+    rows,
+    vehicles,
+    castCount,
+    effectiveVehicleCount,
+    totalCapacity,
+    areaGroupCount: areaGroups.size,
+    shortageCount,
+    statusKey,
+    statusText,
+    deadVehicleNames: getVehicleDeadNamesForHour(targetHour)
+  };
+}
+
+function buildSummaryItemsHtml(items) {
+  return items.map(item => `
+    <div class="hybrid-summary-item">
+      <div class="hybrid-summary-label">${escapeHtml(item.label)}</div>
+      <div class="hybrid-summary-value">${escapeHtml(item.value)}</div>
+    </div>
+  `).join("");
+}
+
+function renderOperationAndSimulationUI() {
+  if (isRefreshingHybridUI) return;
+  isRefreshingHybridUI = true;
+  try {
+    const operationBaseHour = getOperationBaseHour();
+    const realNextHour = getNextHourSlot(operationBaseHour);
+    const lastHour = getLastHourSlot();
+    const operationDiag = diagnoseHourWindow(operationBaseHour);
+    const nextDiag = Number.isFinite(realNextHour) ? diagnoseHourWindow(realNextHour) : null;
+    const lastDiag = Number.isFinite(lastHour) ? diagnoseHourWindow(lastHour) : null;
+
+    if (els.operationContextSummary) {
+      els.operationContextSummary.innerHTML = buildSummaryItemsHtml([
+        { label: "運用基準便", value: getHourLabel(operationBaseHour) },
+        { label: "実際の次便", value: Number.isFinite(realNextHour) ? getHourLabel(realNextHour) : "-" },
+        { label: "ラスト便", value: Number.isFinite(lastHour) ? getHourLabel(lastHour) : "-" },
+        { label: "次便実効車両", value: nextDiag ? `${nextDiag.effectiveVehicleCount}台` : "-" }
+      ]);
+    }
+
+    if (els.operationDiagnosis) {
+      const cls = nextDiag?.statusKey === "danger" || lastDiag?.statusKey === "danger"
+        ? "danger"
+        : (nextDiag?.statusKey === "warn" || lastDiag?.statusKey === "warn" ? "warn" : "ok");
+      const nextDead = nextDiag?.deadVehicleNames?.length ? nextDiag.deadVehicleNames.join(" / ") : "なし";
+      els.operationDiagnosis.className = `hybrid-diagnosis ${cls}`;
+      els.operationDiagnosis.innerHTML = `
+        今便: ${getHourLabel(operationDiag.hour)} / ${operationDiag.castCount}名 / 実効${operationDiag.effectiveVehicleCount}台 / 総定員${operationDiag.totalCapacity} / ${operationDiag.statusText}<br>
+        次便: ${nextDiag ? `${getHourLabel(nextDiag.hour)} / ${nextDiag.castCount}名 / 実効${nextDiag.effectiveVehicleCount}台 / 総定員${nextDiag.totalCapacity} / ${nextDiag.statusText}` : '-'}<br>
+        ラスト便: ${lastDiag ? `${getHourLabel(lastDiag.hour)} / ${lastDiag.castCount}名 / 実効${lastDiag.effectiveVehicleCount}台 / 総定員${lastDiag.totalCapacity} / ${lastDiag.statusText}` : '-'}<br>
+        次便NG車両: ${escapeHtml(nextDead)}
+      `;
+    }
+
+    const hourOptions = getUnifiedHourSet();
+    if (els.simulationSlotSelect) {
+      const previous = Number.isFinite(simulationSlotHour) ? simulationSlotHour : (Number.isFinite(realNextHour) ? realNextHour : operationBaseHour);
+      suppressSimulationSlotChange = true;
+      try {
+        const optionHtml = hourOptions.map(hour => `<option value="${hour}">${getHourLabel(hour)}</option>`).join("");
+        if (els.simulationSlotSelect.innerHTML !== optionHtml) {
+          els.simulationSlotSelect.innerHTML = optionHtml;
+        }
+        const targetValue = hourOptions.includes(previous) ? previous : (hourOptions[0] ?? operationBaseHour);
+        simulationSlotHour = targetValue;
+        if (String(els.simulationSlotSelect.value) !== String(targetValue)) {
+          els.simulationSlotSelect.value = String(targetValue);
+        }
+      } finally {
+        setTimeout(() => { suppressSimulationSlotChange = false; }, 0);
+      }
+    }
+
+    if (!lastSimulationResult && els.simulationDiagnosis) {
+      els.simulationDiagnosis.className = 'hybrid-diagnosis muted';
+      els.simulationDiagnosis.textContent = '試算対象便を選択してください';
+    }
+  } catch (error) {
+    console.error(error);
+    if (els.operationDiagnosis) {
+      els.operationDiagnosis.className = 'hybrid-diagnosis danger';
+      els.operationDiagnosis.textContent = `診断エラー: ${error?.message || error}`;
+    }
+  } finally {
+    isRefreshingHybridUI = false;
+  }
+}
+
+function focusSimulationPanel() {
+  const target = els.simulationDiagnosis || els.simulationPreview;
+  if (!target?.scrollIntoView) return;
+  window.requestAnimationFrame(() => {
+    target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+}
+
+function runSlotDiagnosisPreview() {
+  const hour = Number(els.simulationSlotSelect?.value ?? simulationSlotHour ?? getOperationBaseHour());
+  simulationSlotHour = hour;
+  const diag = diagnoseSimulationHourWindow(hour, { includePlanInflow: Boolean(els.simulationIncludePlanInflow?.checked) });
+  lastSimulationResult = { type: 'diagnosis', hour, diag };
+  if (els.simulationDiagnosis) {
+    els.simulationDiagnosis.className = `hybrid-diagnosis ${diag.statusKey}`;
+    els.simulationDiagnosis.innerHTML = `
+      試算対象便: ${getHourLabel(diag.hour)} / 対象${diag.castCount}名 / 実効${diag.effectiveVehicleCount}台 / 総定員${diag.totalCapacity} / 方面系統${diag.areaGroupCount}<br>
+      判定: ${diag.statusText}${diag.shortageCount > 0 ? ` / 未配車見込み ${diag.shortageCount}名` : ''}<br>
+      次便NG車両: ${escapeHtml(diag.deadVehicleNames.length ? diag.deadVehicleNames.join(' / ') : 'なし')}
+    `;
+  }
+  if (els.simulationPreview) {
+    if (!diag.rows.length) {
+      els.simulationPreview.className = 'simulation-preview muted';
+      els.simulationPreview.textContent = 'この便の予定対象はありません';
+    } else {
+      const list = diag.rows.map(row => `${row?.casts?.name || '-'} / ${normalizeAreaLabel(row?.destination_area || row?.planned_area || row?.casts?.area || '-')}`).join('<br>');
+      els.simulationPreview.className = 'simulation-preview';
+      els.simulationPreview.innerHTML = `
+        <div class="sim-preview-head">
+          <h4 class="sim-preview-title">試算対象一覧</h4>
+          <span class="chip">${getHourLabel(diag.hour)}</span>
+        </div>
+        <div class="sim-preview-meta">対象便予定 ${diag.slotPlanCount}名 / 前便未処理予定 ${diag.inflowPlanCount}名</div>
+        <div>${list}</div>
+      `;
+    }
+  }
+  focusSimulationPanel();
+}
+
+function getAssignmentsForPreview(items, vehicles, monthlyMap) {
+  let assignments = optimizeAssignments(items, vehicles, monthlyMap);
+  if (!Array.isArray(assignments)) assignments = [];
+
+  if (__hasEnoughVehiclesForDisplayGroups(items, vehicles)) {
+    assignments = __buildAssignmentsPreserveDisplayGroups(items, vehicles, monthlyMap);
+  } else {
+    const routeFlowAssignments = optimizeAssignmentsByRouteFlow(assignments, items, vehicles);
+    assignments = Array.isArray(routeFlowAssignments) ? routeFlowAssignments : assignments;
+    if (!Array.isArray(assignments) || !assignments.length) assignments = buildFallbackAssignments(items, vehicles);
+    const balancedAssignments = optimizeAssignmentsByDistanceBalance(assignments, items, vehicles, monthlyMap);
+    assignments = Array.isArray(balancedAssignments) ? balancedAssignments : assignments;
+    const correctedAssignments = applyLastTripDistanceCorrectionToAssignments(assignments, items, vehicles, monthlyMap);
+    assignments = Array.isArray(correctedAssignments) ? correctedAssignments : assignments;
+    const manualAssignments = applyManualLastVehicleToAssignments(assignments, vehicles);
+    assignments = Array.isArray(manualAssignments) ? manualAssignments : assignments;
+  }
+
+  return Array.isArray(assignments) ? assignments : [];
+}
+
+function runSimulationDispatchPreview() {
+  const hour = Number(els.simulationSlotSelect?.value ?? simulationSlotHour ?? getOperationBaseHour());
+  simulationSlotHour = hour;
+  const simBuilt = buildSimulationRowsForHour(hour, { includePlanInflow: Boolean(els.simulationIncludePlanInflow?.checked) });
+  const items = simBuilt.rows.map((row, index) => ({ ...row, id: Number(row?.id || -(index + 1)) }));
+  const vehicles = getEffectiveVehiclesForHour(hour);
+  const monthlyMap = buildMonthlyDistanceMapForCurrentMonth();
+  const assignments = getAssignmentsForPreview(items, vehicles, monthlyMap);
+  const applied = items.map(item => {
+    const assigned = assignments.find(a => Number(a?.item_id) === Number(item.id));
+    return assigned ? { ...item, vehicle_id: assigned.vehicle_id, driver_name: assigned.driver_name || '' } : { ...item };
+  });
+  const cards = buildDailyDispatchVehicleCards(vehicles, applied, monthlyMap);
+  const html = cards.map(({ vehicle, orderedRows }) => {
+    const summary = getVehicleDailySummary(vehicle, orderedRows);
+    const forecast = getVehicleRotationForecastSafe(vehicle, orderedRows);
+    const body = orderedRows.length
+      ? orderedRows.map((row, index) => `
+          <div class="sim-preview-row">
+            <span>順番${index + 1} ${escapeHtml(row?.casts?.name || '-')} / ${escapeHtml(normalizeAreaLabel(row?.destination_area || row?.planned_area || row?.casts?.area || '-'))}</span>
+            <span>${Number(row?.distance_km || 0).toFixed(1)}km</span>
+          </div>
+        `).join('')
+      : `<div class="muted">送りなし</div>`;
+    return `
+      <div class="sim-preview-card">
+        <h4>${escapeHtml(vehicle?.driver_name || vehicle?.plate_number || '-')}</h4>
+        <div class="sim-preview-meta">人数 ${orderedRows.length} / 距離 ${summary.totalKm.toFixed(1)}km / 戻り ${escapeHtml(forecast.returnAfterLabel)} / 次便可能 ${escapeHtml(forecast.predictedReadyTime)}</div>
+        ${body}
+      </div>
+    `;
+  }).join('');
+
+  const unassigned = applied.filter(item => !Number(item?.vehicle_id || 0));
+  const diag = diagnoseSimulationHourWindow(hour, { includePlanInflow: Boolean(els.simulationIncludePlanInflow?.checked) });
+  lastSimulationResult = { type: 'dispatch', hour, diag, unassignedCount: unassigned.length };
+  if (els.simulationDiagnosis) {
+    const cls = unassigned.length > 0 || diag.statusKey === 'danger' ? 'danger' : (diag.statusKey === 'warn' ? 'warn' : 'ok');
+    els.simulationDiagnosis.className = `hybrid-diagnosis ${cls}`;
+    els.simulationDiagnosis.innerHTML = `
+      試算対象便: ${getHourLabel(hour)} / 実効${vehicles.length}台 / 総定員${diag.totalCapacity} / 判定 ${diag.statusText}<br>
+      ${unassigned.length ? `未配車見込み ${unassigned.length}名` : '未配車見込み 0名'} / 次便NG車両 ${escapeHtml(diag.deadVehicleNames.length ? diag.deadVehicleNames.join(' / ') : 'なし')}
+    `;
+  }
+  if (els.simulationPreview) {
+    els.simulationPreview.className = 'simulation-preview';
+    els.simulationPreview.innerHTML = `
+      <div class="sim-preview-head">
+        <h4 class="sim-preview-title">試算配車プレビュー</h4>
+        <span class="chip">${getHourLabel(hour)}</span>
+      </div>
+      <div class="sim-preview-meta">このプレビューは保存しません。対象便予定 ${diag.slotPlanCount}名 / 前便未処理予定 ${diag.inflowPlanCount}名 / 現実の配車状態は維持されます。</div>
+      <div class="sim-preview-grid">${html || '<div class="muted">配車結果なし</div>'}</div>
+    `;
+  }
+  focusSimulationPanel();
 }
 
 function isValidLatLng(lat, lng) {
@@ -3760,6 +4251,7 @@ async function loadPlansByDate(dateStr) {
   renderPlanSelect();
   renderPlanCastSelect();
   renderHomeSummary();
+  renderOperationAndSimulationUI();
 }
 
 
@@ -4886,6 +5378,7 @@ function renderDailyVehicleChecklist() {
     els.dailyVehicleChecklist.appendChild(row);
   });
 
+  renderOperationAndSimulationUI();
   els.dailyVehicleChecklist.querySelectorAll(".vehicle-check-input").forEach(input => {
     input.addEventListener("change", () => {
       const id = Number(input.dataset.id);
@@ -7311,7 +7804,7 @@ function renderDailyDispatchResult() {
   const vehicles = getSelectedVehiclesForToday();
   if (!vehicles.length) {
     els.dailyDispatchResult.innerHTML = `<div class="muted">使用車両が未選択です</div>`;
-    renderHybridSimulationPanels();
+    renderOperationAndSimulationUI();
     return;
   }
 
@@ -7417,7 +7910,7 @@ function renderDailyDispatchResult() {
       .join("");
 
     els.dailyDispatchResult.innerHTML = timelineHtml + cardsHtml;
-    renderHybridSimulationPanels();
+    renderOperationAndSimulationUI();
 
     els.dailyDispatchResult.querySelectorAll(".dispatch-vehicle-select").forEach(select => {
       select.addEventListener("change", async () => {
@@ -7446,6 +7939,7 @@ function renderDailyDispatchResult() {
   } catch (error) {
     console.error("renderDailyDispatchResult error:", error);
     els.dailyDispatchResult.innerHTML = `<div class="muted">配車結果の表示でエラーが発生しました</div>`;
+    renderOperationAndSimulationUI();
   }
 }
 
@@ -8054,7 +8548,6 @@ async function loadHomeAndAll() {
   renderDailyVehicleChecklist();
   renderDailyMileageInputs();
   renderDailyDispatchResult();
-  renderHybridSimulationPanels();
   renderHomeSummary();
   renderHomeMonthlyVehicleList();
 }
@@ -8247,385 +8740,6 @@ async function syncDateAndReloadFromActualDate() {
   await loadDailyReports(dateStr);
 }
 
-
-function parseClockTextToMinutes(value) {
-  if (!value || value === '-') return null;
-  const m = String(value).match(/^(\d{1,2}):(\d{2})$/);
-  if (!m) return null;
-  return Number(m[1]) * 60 + Number(m[2]);
-}
-
-function getUnifiedHourSet() {
-  const set = new Set();
-  (Array.isArray(currentPlansCache) ? currentPlansCache : []).forEach(row => {
-    const hour = Number(row?.plan_hour ?? row?.actual_hour);
-    if (Number.isFinite(hour)) set.add(hour);
-  });
-  (Array.isArray(currentActualsCache) ? currentActualsCache : []).forEach(row => {
-    const hour = Number(row?.actual_hour ?? row?.plan_hour);
-    if (Number.isFinite(hour)) set.add(hour);
-  });
-  if (!set.size) set.add(getDefaultLastHour(els.dispatchDate?.value || todayStr()));
-  return [...set].sort((a, b) => a - b);
-}
-
-function getOperationBaseHour() {
-  const unfinishedActualHours = (Array.isArray(currentActualsCache) ? currentActualsCache : [])
-    .filter(row => {
-      const status = normalizeStatus(row?.status);
-      return status !== 'done' && status !== 'cancel';
-    })
-    .map(row => Number(row?.actual_hour ?? row?.plan_hour))
-    .filter(Number.isFinite)
-    .sort((a, b) => a - b);
-  if (unfinishedActualHours.length) return unfinishedActualHours[0];
-  const plannedHours = (Array.isArray(currentPlansCache) ? currentPlansCache : [])
-    .map(row => Number(row?.plan_hour ?? row?.actual_hour))
-    .filter(Number.isFinite)
-    .sort((a, b) => a - b);
-  if (plannedHours.length) return plannedHours[0];
-  return getDefaultLastHour(els.dispatchDate?.value || todayStr());
-}
-
-function getNextHourSlot(baseHour) {
-  const hours = getUnifiedHourSet();
-  const found = hours.find(hour => Number(hour) > Number(baseHour));
-  return Number.isFinite(found) ? found : null;
-}
-
-function getLastHourSlot() {
-  const hours = getUnifiedHourSet();
-  return hours.length ? hours[hours.length - 1] : getDefaultLastHour(els.dispatchDate?.value || todayStr());
-}
-
-function getSimulationCompleteCastIds() {
-  return new Set((Array.isArray(currentActualsCache) ? currentActualsCache : [])
-    .filter(row => {
-      const status = normalizeStatus(row?.status);
-      return status === 'done' || status === 'cancel';
-    })
-    .map(row => Number(row?.cast_id || 0))
-    .filter(Boolean));
-}
-
-function createSimulatedRowFromPlan(plan, hour) {
-  return {
-    id: -1 * (100000 + Number(plan?.id || 0)),
-    plan_id: Number(plan?.id || 0),
-    cast_id: Number(plan?.cast_id || 0),
-    actual_hour: Number(hour),
-    plan_hour: Number(hour),
-    status: 'pending',
-    distance_km: Number(plan?.distance_km || plan?.casts?.distance_km || 0),
-    destination_area: plan?.planned_area || plan?.casts?.area || '',
-    destination_address: plan?.destination_address || plan?.casts?.address || '',
-    note: plan?.note || '',
-    casts: {
-      ...(plan?.casts || {}),
-      name: plan?.casts?.name || '',
-      area: plan?.planned_area || plan?.casts?.area || '',
-      address: plan?.destination_address || plan?.casts?.address || '',
-      distance_km: Number(plan?.distance_km || plan?.casts?.distance_km || 0),
-      travel_minutes: Number(plan?.casts?.travel_minutes || 0),
-    },
-    simulated_from_plan: true,
-    vehicle_id: null,
-    driver_name: ''
-  };
-}
-
-function buildSimulationRowsForHour(targetHour, options = {}) {
-  const hour = Number(targetHour);
-  const includeInflow = Boolean(options.includeInflow);
-  const closedCastIds = getSimulationCompleteCastIds();
-  const allActuals = Array.isArray(currentActualsCache) ? currentActualsCache : [];
-  const allPlans = Array.isArray(currentPlansCache) ? currentPlansCache : [];
-
-  const selectedHourActuals = allActuals
-    .filter(row => Number(row?.actual_hour ?? row?.plan_hour) === hour)
-    .filter(row => {
-      const status = normalizeStatus(row?.status);
-      return status !== 'done' && status !== 'cancel';
-    })
-    .map(row => ({ ...row }));
-
-  const actualPlanIds = new Set(selectedHourActuals.map(row => Number(row?.plan_id || 0)).filter(Boolean));
-  const actualCastIds = new Set(selectedHourActuals.map(row => Number(row?.cast_id || 0)).filter(Boolean));
-
-  const selectedHourPlans = allPlans
-    .filter(plan => Number(plan?.plan_hour ?? plan?.actual_hour) === hour)
-    .filter(plan => !closedCastIds.has(Number(plan?.cast_id || 0)))
-    .filter(plan => !actualPlanIds.has(Number(plan?.id || 0)))
-    .filter(plan => !actualCastIds.has(Number(plan?.cast_id || 0)))
-    .map(plan => createSimulatedRowFromPlan(plan, hour));
-
-  const inflowRows = includeInflow
-    ? allActuals
-        .filter(row => Number(row?.actual_hour ?? row?.plan_hour) < hour)
-        .filter(row => {
-          const status = normalizeStatus(row?.status);
-          return status !== 'done' && status !== 'cancel';
-        })
-        .map(row => ({ ...row, simulated_inflow: true }))
-    : [];
-
-  const byKey = new Map();
-  [...selectedHourActuals, ...selectedHourPlans, ...inflowRows].forEach(row => {
-    const key = `${Number(row?.cast_id || 0)}__${Number(row?.plan_id || 0)}__${Number(row?.id || 0)}`;
-    if (!byKey.has(key)) byKey.set(key, row);
-  });
-
-  return [...byKey.values()].sort((a, b) => {
-    const aInflow = a.simulated_inflow ? 0 : 1;
-    const bInflow = b.simulated_inflow ? 0 : 1;
-    if (aInflow !== bInflow) return aInflow - bInflow;
-    return Number(a?.distance_km || 0) - Number(b?.distance_km || 0);
-  });
-}
-
-function getEffectiveVehiclesForHour(targetHour) {
-  const slotMinutes = Number(targetHour) * 60;
-  const vehicles = Array.isArray(getSelectedVehiclesForToday()) ? getSelectedVehiclesForToday().filter(Boolean) : [];
-  const activeItems = (Array.isArray(currentActualsCache) ? currentActualsCache : []).filter(row => {
-    const status = normalizeStatus(row?.status);
-    return status !== 'done' && status !== 'cancel';
-  });
-
-  return vehicles.filter(vehicle => {
-    const rows = activeItems.filter(item => Number(item?.vehicle_id || 0) === Number(vehicle.id));
-    if (!rows.length) return true;
-    const orderedRows = moveManualLastItemsToEnd(sortItemsByNearestRoute(rows));
-    const forecast = getVehicleRotationForecastSafe(vehicle, orderedRows);
-    const readyMinutes = parseClockTextToMinutes(forecast?.predictedReadyTime);
-    if (readyMinutes === null) return true;
-    return readyMinutes <= slotMinutes;
-  });
-}
-
-function getVehicleDeadNamesForHour(targetHour) {
-  const slotMinutes = Number(targetHour) * 60;
-  const vehicles = Array.isArray(getSelectedVehiclesForToday()) ? getSelectedVehiclesForToday().filter(Boolean) : [];
-  const activeItems = (Array.isArray(currentActualsCache) ? currentActualsCache : []).filter(row => {
-    const status = normalizeStatus(row?.status);
-    return status !== 'done' && status !== 'cancel';
-  });
-
-  return vehicles.filter(vehicle => {
-    const rows = activeItems.filter(item => Number(item?.vehicle_id || 0) === Number(vehicle.id));
-    if (!rows.length) return false;
-    const orderedRows = moveManualLastItemsToEnd(sortItemsByNearestRoute(rows));
-    const forecast = getVehicleRotationForecastSafe(vehicle, orderedRows);
-    const readyMinutes = parseClockTextToMinutes(forecast?.predictedReadyTime);
-    return readyMinutes !== null && readyMinutes > slotMinutes;
-  }).map(vehicle => vehicle?.driver_name || vehicle?.plate_number || `車両${vehicle.id}`);
-}
-
-function summarizeDiagnosis(hour, rows, vehicles) {
-  const castCount = Array.isArray(rows) ? rows.length : 0;
-  const totalCapacity = (Array.isArray(vehicles) ? vehicles : []).reduce((sum, v) => sum + Math.max(1, Number(v?.seat_capacity || 4)), 0);
-  const areaGroups = new Set((Array.isArray(rows) ? rows : []).map(row => getAreaDisplayGroup(normalizeAreaLabel(row?.destination_area || row?.planned_area || row?.casts?.area || '無し'))));
-  const shortageCount = Math.max(0, castCount - totalCapacity);
-  let statusKey = 'ok';
-  let title = '問題なし';
-  if (totalCapacity < castCount) {
-    statusKey = 'danger';
-    title = '定員オーバー';
-  } else if (areaGroups.size > vehicles.length && castCount > 0) {
-    statusKey = 'warn';
-    title = '注意';
-  }
-  return { hour:Number(hour), castCount, vehicleCount: vehicles.length, totalCapacity, areaGroupCount: areaGroups.size, shortageCount, statusKey, title };
-}
-
-function buildDiagnosisCardsHtml(items) {
-  return items.map(item => {
-    const reasons = [];
-    if (item.shortageCount > 0) reasons.push(`<span class="diag-reason danger">定員不足 ${item.shortageCount}名</span>`);
-    if (item.areaGroupCount > item.vehicleCount && item.castCount > 0) reasons.push(`<span class="diag-reason warn">方面 ${item.areaGroupCount}系統</span>`);
-    if (item.deadNames?.length) reasons.push(`<span class="diag-reason info">車両ロスト</span>`);
-    if (!reasons.length) reasons.push(`<span class="diag-reason ok">余裕あり</span>`);
-    return `
-      <div class="diagnosis-card ${item.statusKey}">
-        <div class="diagnosis-card-head">
-          <div class="diagnosis-card-label">${escapeHtml(item.label)}</div>
-          <span class="diag-badge ${item.statusKey}">${item.statusKey === 'ok' ? '青' : item.statusKey === 'warn' ? '黄' : '赤'}</span>
-        </div>
-        <div class="diag-main">${escapeHtml(item.title)}</div>
-        ${item.modeLabel ? `<div class="diag-mode">${escapeHtml(item.modeLabel)}</div>` : ''}
-        <div class="diag-stats-row">
-          <div class="diag-stat-box"><span class="diag-stat-label">人数</span><strong>${item.castCount}名</strong></div>
-          <div class="diag-stat-box"><span class="diag-stat-label">車両</span><strong>${item.vehicleCount}台</strong></div>
-          <div class="diag-stat-box"><span class="diag-stat-label">定員</span><strong>${item.totalCapacity}席</strong></div>
-        </div>
-        <div class="diag-reasons">${reasons.join('')}</div>
-        <div class="diag-footer">未配車見込み ${item.shortageCount}名</div>
-        <div class="diag-footer">次便NG: ${escapeHtml(item.deadNames?.length ? item.deadNames.join(' / ') : 'なし')}</div>
-      </div>
-    `;
-  }).join('');
-}
-
-function buildSummaryItemsHtml(items) {
-  return items.map(item => `
-    <div class="hybrid-summary-item">
-      <div class="hybrid-summary-label">${escapeHtml(item.label)}</div>
-      <div class="hybrid-summary-value">${escapeHtml(item.value)}</div>
-    </div>
-  `).join('');
-}
-
-function renderHybridSimulationPanels() {
-  if (!els.operationContextSummary || !els.operationDiagnosis || !els.simulationSlotSelect) return;
-  const operationBaseHour = getOperationBaseHour();
-  const realNextHour = getNextHourSlot(operationBaseHour);
-  const lastHour = getLastHourSlot();
-  const operationRows = buildSimulationRowsForHour(operationBaseHour, { includeInflow: false });
-  const operationVehicles = getEffectiveVehiclesForHour(operationBaseHour);
-  const nextRows = Number.isFinite(realNextHour) ? buildSimulationRowsForHour(realNextHour, { includeInflow: false }) : [];
-  const nextVehicles = Number.isFinite(realNextHour) ? getEffectiveVehiclesForHour(realNextHour) : [];
-  const lastRows = buildSimulationRowsForHour(lastHour, { includeInflow: false });
-  const lastVehicles = getEffectiveVehiclesForHour(lastHour);
-  const nextDead = Number.isFinite(realNextHour) ? getVehicleDeadNamesForHour(realNextHour) : [];
-
-  els.operationContextSummary.innerHTML = buildSummaryItemsHtml([
-    { label: '運用基準便', value: getHourLabel(operationBaseHour) },
-    { label: '実際の次便', value: Number.isFinite(realNextHour) ? getHourLabel(realNextHour) : '-' },
-    { label: 'ラスト便', value: Number.isFinite(lastHour) ? getHourLabel(lastHour) : '-' },
-    { label: '次便実効車両', value: Number.isFinite(realNextHour) ? `${nextVehicles.length}台` : '-' }
-  ]);
-
-  els.operationDiagnosis.innerHTML = buildDiagnosisCardsHtml([
-    { label: '今便', ...summarizeDiagnosis(operationBaseHour, operationRows, operationVehicles), deadNames: getVehicleDeadNamesForHour(operationBaseHour) },
-    { label: '次便', ...summarizeDiagnosis(realNextHour, nextRows, nextVehicles), deadNames: nextDead },
-    { label: 'ラスト便', ...summarizeDiagnosis(lastHour, lastRows, lastVehicles), deadNames: getVehicleDeadNamesForHour(lastHour) }
-  ]);
-  els.operationDiagnosis.className = 'hybrid-diagnosis cards';
-
-  const hourOptions = getUnifiedHourSet();
-  const previous = Number.isFinite(simulationSlotHour) ? simulationSlotHour : (Number.isFinite(realNextHour) ? realNextHour : operationBaseHour);
-  els.simulationSlotSelect.innerHTML = hourOptions.map(hour => `<option value="${hour}">${getHourLabel(hour)}</option>`).join('');
-  const targetValue = hourOptions.includes(previous) ? previous : (hourOptions[0] ?? operationBaseHour);
-  simulationSlotHour = targetValue;
-  els.simulationSlotSelect.value = String(targetValue);
-
-  if (!lastSimulationResult && els.simulationDiagnosis) {
-    els.simulationDiagnosis.className = 'hybrid-diagnosis muted';
-    els.simulationDiagnosis.textContent = '試算対象便を選択してください';
-  }
-}
-
-function runSlotDiagnosisPreview() {
-  const hour = Number(els.simulationSlotSelect?.value ?? simulationSlotHour ?? getOperationBaseHour());
-  simulationSlotHour = hour;
-  const includeInflow = Boolean(els.simulationIncludeInflow?.checked);
-  const rows = buildSimulationRowsForHour(hour, { includeInflow });
-  const vehicles = getEffectiveVehiclesForHour(hour);
-  const diag = summarizeDiagnosis(hour, rows, vehicles);
-  diag.deadNames = getVehicleDeadNamesForHour(hour);
-  diag.label = '試算配車';
-  diag.modeLabel = includeInflow ? '前便未完了流入あり' : '前便未完了流入なし';
-  lastSimulationResult = { type: 'diagnosis', hour, diag };
-  if (els.simulationDiagnosis) {
-    els.simulationDiagnosis.className = 'hybrid-diagnosis cards';
-    els.simulationDiagnosis.innerHTML = buildDiagnosisCardsHtml([diag]);
-  }
-  if (els.simulationPreview) {
-    if (!rows.length) {
-      els.simulationPreview.className = 'simulation-preview muted';
-      els.simulationPreview.textContent = 'この便の試算対象はありません';
-    } else {
-      const targetCount = rows.filter(row => !row.simulated_inflow).length;
-      const inflowCount = rows.filter(row => row.simulated_inflow).length;
-      const list = rows.map(row => `${row?.casts?.name || '-'} / ${normalizeAreaLabel(row?.destination_area || row?.planned_area || row?.casts?.area || '-')} ${row.simulated_inflow ? '（前便未完了）' : ''}`).join('<br>');
-      els.simulationPreview.className = 'simulation-preview';
-      els.simulationPreview.innerHTML = `
-        <div class="sim-preview-head">
-          <h4 class="sim-preview-title">試算対象一覧</h4>
-          <span class="chip">${getHourLabel(hour)}</span>
-        </div>
-        <div class="sim-preview-meta">対象便残 ${targetCount}名 / 前便流入 ${inflowCount}名</div>
-        <div>${list}</div>
-      `;
-    }
-  }
-}
-
-function getAssignmentsForPreview(items, vehicles, monthlyMap) {
-  let assignments = optimizeAssignments(items, vehicles, monthlyMap);
-  if (!Array.isArray(assignments)) assignments = [];
-  if (__shouldBlockDirectionMerge(items, vehicles)) {
-    try {
-      if (typeof __buildAssignmentsPreserveDisplayGroups === 'function') {
-        assignments = __buildAssignmentsPreserveDisplayGroups(items, vehicles, monthlyMap);
-      }
-    } catch (e) { console.error(e); }
-  } else {
-    const routeFlowAssignments = optimizeAssignmentsByRouteFlow(assignments, items, vehicles);
-    assignments = Array.isArray(routeFlowAssignments) ? routeFlowAssignments : assignments;
-    const balancedAssignments = optimizeAssignmentsByDistanceBalance(assignments, items, vehicles, monthlyMap);
-    assignments = Array.isArray(balancedAssignments) ? balancedAssignments : assignments;
-    const correctedAssignments = applyManualLastVehicleToAssignments(assignments, vehicles);
-    assignments = Array.isArray(correctedAssignments) ? correctedAssignments : assignments;
-  }
-  return Array.isArray(assignments) ? assignments : [];
-}
-
-function runSimulationDispatchPreview() {
-  const hour = Number(els.simulationSlotSelect?.value ?? simulationSlotHour ?? getOperationBaseHour());
-  simulationSlotHour = hour;
-  const includeInflow = Boolean(els.simulationIncludeInflow?.checked);
-  const items = buildSimulationRowsForHour(hour, { includeInflow }).map((row, index) => ({ ...row, id: Number(row?.id || -(index + 1)) }));
-  const vehicles = getEffectiveVehiclesForHour(hour);
-  const monthlyMap = buildMonthlyDistanceMapForCurrentMonth();
-  const assignments = getAssignmentsForPreview(items, vehicles, monthlyMap);
-  const applied = items.map(item => {
-    const assigned = assignments.find(a => Number(a?.item_id) === Number(item.id));
-    return assigned ? { ...item, vehicle_id: assigned.vehicle_id, driver_name: assigned.driver_name || '' } : { ...item };
-  });
-  const cards = buildDailyDispatchVehicleCards(vehicles, applied, monthlyMap);
-  const html = cards.map(({ vehicle, orderedRows }) => {
-    const summary = getVehicleDailySummary(vehicle, orderedRows);
-    const forecast = getVehicleRotationForecastSafe(vehicle, orderedRows);
-    const body = orderedRows.length
-      ? orderedRows.map((row, index) => `
-          <div class="sim-preview-row">
-            <span>順番${index + 1} ${escapeHtml(row?.casts?.name || '-')} / ${escapeHtml(normalizeAreaLabel(row?.destination_area || row?.planned_area || row?.casts?.area || '-'))}${row.simulated_inflow ? '（前便未完了）' : ''}</span>
-            <span>${Number(row?.distance_km || 0).toFixed(1)}km</span>
-          </div>
-        `).join('')
-      : `<div class="muted">送りなし</div>`;
-    return `
-      <div class="sim-preview-card">
-        <h4>${escapeHtml(vehicle?.driver_name || vehicle?.plate_number || '-')}</h4>
-        <div class="sim-preview-meta">人数 ${orderedRows.length} / 距離 ${summary.totalKm.toFixed(1)}km / 戻り ${escapeHtml(forecast.returnAfterLabel)} / 次便可能 ${escapeHtml(forecast.predictedReadyTime)}</div>
-        ${body}
-      </div>
-    `;
-  }).join('');
-  const unassigned = applied.filter(item => !Number(item?.vehicle_id || 0));
-  const diag = summarizeDiagnosis(hour, applied, vehicles);
-  diag.deadNames = getVehicleDeadNamesForHour(hour);
-  diag.label = '試算配車';
-  diag.modeLabel = includeInflow ? '前便未完了流入あり' : '前便未完了流入なし';
-  lastSimulationResult = { type: 'dispatch', hour, diag, unassignedCount: unassigned.length };
-  if (els.simulationDiagnosis) {
-    els.simulationDiagnosis.className = 'hybrid-diagnosis cards';
-    els.simulationDiagnosis.innerHTML = buildDiagnosisCardsHtml([{ ...diag, shortageCount: Math.max(diag.shortageCount, unassigned.length) }]);
-  }
-  if (els.simulationPreview) {
-    els.simulationPreview.className = 'simulation-preview';
-    els.simulationPreview.innerHTML = `
-      <div class="sim-preview-head">
-        <h4 class="sim-preview-title">試算配車プレビュー</h4>
-        <span class="chip">${getHourLabel(hour)}</span>
-      </div>
-      <div class="sim-preview-meta">対象便の完了済みは除外し、${includeInflow ? '前便未完了を流入' : '前便未完了は流入なし'}で試算しています。保存はしません。</div>
-      <div class="sim-preview-grid">${html || '<div class="muted">配車結果なし</div>'}</div>
-    `;
-  }
-}
-
-
 function bindPlanAndActualFormEvents() {
   if (els.planCastSelect) {
     els.planCastSelect.addEventListener("change", () => syncPlanFieldsFromCastInput(true));
@@ -8643,6 +8757,17 @@ function bindPlanAndActualFormEvents() {
 
 function bindDispatchEvents() {
   if (els.optimizeBtn) els.optimizeBtn.addEventListener("click", runAutoDispatch);
+  if (els.simulationSlotSelect) els.simulationSlotSelect.addEventListener("change", () => {
+    if (suppressSimulationSlotChange || isRefreshingHybridUI) return;
+    simulationSlotHour = Number(els.simulationSlotSelect.value || getOperationBaseHour());
+    runSlotDiagnosisPreview();
+  });
+  if (els.simulationIncludePlanInflow) els.simulationIncludePlanInflow.addEventListener("change", () => {
+    if (isRefreshingHybridUI) return;
+    runSlotDiagnosisPreview();
+  });
+  if (els.runSimulationBtn) els.runSimulationBtn.addEventListener("click", runSlotDiagnosisPreview);
+  if (els.runSimulationDispatchBtn) els.runSimulationDispatchBtn.addEventListener("click", runSimulationDispatchPreview);
 }
 
 function bindPostDispatchEvents() {
@@ -8725,15 +8850,6 @@ function setupEvents() {
   els.clearManualLastVehicleBtn?.addEventListener("click", clearManualLastVehicle);
   els.resetMonthlySummaryBtn?.addEventListener("click", resetMonthlySummary);
 
-
-  els.simulationSlotSelect?.addEventListener("change", () => {
-    simulationSlotHour = Number(els.simulationSlotSelect.value || getOperationBaseHour());
-  });
-  els.simulationIncludeInflow?.addEventListener("change", () => {
-    if (lastSimulationResult) runSlotDiagnosisPreview();
-  });
-  els.runSimulationBtn?.addEventListener("click", runSlotDiagnosisPreview);
-  els.runSimulationDispatchBtn?.addEventListener("click", runSimulationDispatchPreview);
   els.dispatchDate?.addEventListener("change", syncDateAndReloadFromDispatchDate);
   els.planDate?.addEventListener("change", syncDateAndReloadFromPlanDate);
   els.actualDate?.addEventListener("change", syncDateAndReloadFromActualDate);
