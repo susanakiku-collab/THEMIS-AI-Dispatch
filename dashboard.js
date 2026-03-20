@@ -132,6 +132,7 @@ const els = {
   operationContextSummary: document.getElementById("operationContextSummary"),
   operationDiagnosis: document.getElementById("operationDiagnosis"),
   simulationSlotSelect: document.getElementById("simulationSlotSelect"),
+  simulationIgnoreClosedToggle: document.getElementById("simulationIgnoreClosedToggle"),
   runSimulationBtn: document.getElementById("runSimulationBtn"),
   runSimulationDispatchBtn: document.getElementById("runSimulationDispatchBtn"),
   simulationDiagnosis: document.getElementById("simulationDiagnosis"),
@@ -366,6 +367,10 @@ function getDayOfWeek(dateStr) {
 }
 
 
+function isSimulationIgnoreClosedEnabled() {
+  return Boolean(els.simulationIgnoreClosedToggle?.checked);
+}
+
 function getUnifiedHourSet() {
   const set = new Set();
   (Array.isArray(currentPlansCache) ? currentPlansCache : []).forEach(row => {
@@ -373,8 +378,6 @@ function getUnifiedHourSet() {
     if (Number.isFinite(hour)) set.add(hour);
   });
   (Array.isArray(currentActualsCache) ? currentActualsCache : []).forEach(row => {
-    const status = normalizeStatus(row?.status);
-    if (status === "cancel") return;
     const hour = Number(row?.actual_hour ?? row?.plan_hour);
     if (Number.isFinite(hour)) set.add(hour);
   });
@@ -421,18 +424,21 @@ function parseClockTextToMinutes(value) {
   return Number(m[1]) * 60 + Number(m[2]);
 }
 
-function buildProjectedRowsForHour(targetHour) {
+function buildProjectedRowsForHour(targetHour, options = {}) {
   const hour = Number(targetHour);
+  const ignoreClosed = Boolean(options.ignoreClosed);
+
   const actualRows = (Array.isArray(currentActualsCache) ? currentActualsCache : [])
     .filter(row => Number(row?.actual_hour ?? row?.plan_hour) === hour)
     .filter(row => {
       const status = normalizeStatus(row?.status);
+      if (ignoreClosed) return true;
       return status !== "done" && status !== "cancel";
     });
 
   const actualPlanIds = new Set(actualRows.map(row => Number(row?.plan_id || 0)).filter(Boolean));
   const actualCastKeys = new Set(actualRows.map(row => `${Number(row?.cast_id || 0)}:${hour}`));
-  const doneOrCancelPlanIds = new Set(
+  const doneOrCancelPlanIds = ignoreClosed ? new Set() : new Set(
     (Array.isArray(currentActualsCache) ? currentActualsCache : [])
       .filter(row => Number(row?.actual_hour ?? row?.plan_hour) === hour)
       .filter(row => {
@@ -472,11 +478,13 @@ function buildProjectedRowsForHour(targetHour) {
   return [...actualRows, ...planRows];
 }
 
-function getEffectiveVehiclesForHour(targetHour) {
+function getEffectiveVehiclesForHour(targetHour, options = {}) {
   const slotMinutes = Number(targetHour) * 60;
+  const ignoreClosed = Boolean(options.ignoreClosed);
   const vehicles = Array.isArray(getSelectedVehiclesForToday()) ? getSelectedVehiclesForToday().filter(Boolean) : [];
   const activeItems = (Array.isArray(currentActualsCache) ? currentActualsCache : []).filter(row => {
     const status = normalizeStatus(row?.status);
+    if (ignoreClosed) return true;
     return status !== "done" && status !== "cancel";
   });
 
@@ -491,11 +499,13 @@ function getEffectiveVehiclesForHour(targetHour) {
   });
 }
 
-function getVehicleDeadNamesForHour(targetHour) {
+function getVehicleDeadNamesForHour(targetHour, options = {}) {
   const slotMinutes = Number(targetHour) * 60;
+  const ignoreClosed = Boolean(options.ignoreClosed);
   const vehicles = Array.isArray(getSelectedVehiclesForToday()) ? getSelectedVehiclesForToday().filter(Boolean) : [];
   const activeItems = (Array.isArray(currentActualsCache) ? currentActualsCache : []).filter(row => {
     const status = normalizeStatus(row?.status);
+    if (ignoreClosed) return true;
     return status !== "done" && status !== "cancel";
   });
 
@@ -509,25 +519,23 @@ function getVehicleDeadNamesForHour(targetHour) {
   }).map(vehicle => vehicle?.driver_name || vehicle?.plate_number || `車両${vehicle.id}`);
 }
 
-function diagnoseHourWindow(targetHour) {
-  const rows = buildProjectedRowsForHour(targetHour);
-  const vehicles = getEffectiveVehiclesForHour(targetHour);
+function diagnoseHourWindow(targetHour, options = {}) {
+  const hour = Number(targetHour);
+  const rows = buildProjectedRowsForHour(hour, options);
+  const vehicles = getEffectiveVehiclesForHour(hour, options);
   const effectiveVehicleCount = vehicles.length;
   const totalCapacity = vehicles.reduce((sum, vehicle) => sum + Math.max(1, Number(vehicle?.seat_capacity || 4)), 0);
   const castCount = rows.length;
   const areaGroups = new Set(rows.map(row => getAreaDisplayGroup(normalizeAreaLabel(row?.destination_area || row?.planned_area || row?.casts?.area || "無し"))));
   const shortageCount = Math.max(0, castCount - totalCapacity);
+  const deadVehicleNames = getVehicleDeadNamesForHour(hour, options);
+
   let statusKey = "ok";
-  let statusText = "OK";
-  if (totalCapacity < castCount) {
-    statusKey = "danger";
-    statusText = "定員オーバー見込み";
-  } else if (areaGroups.size > effectiveVehicleCount && castCount > 0) {
-    statusKey = "warn";
-    statusText = "車両不足見込み";
-  }
+  if (totalCapacity < castCount) statusKey = "danger";
+  else if (areaGroups.size > effectiveVehicleCount && castCount > 0) statusKey = "warn";
+
   return {
-    hour: Number(targetHour),
+    hour,
     rows,
     vehicles,
     castCount,
@@ -536,72 +544,13 @@ function diagnoseHourWindow(targetHour) {
     areaGroupCount: areaGroups.size,
     shortageCount,
     statusKey,
-    statusText,
-    deadVehicleNames: getVehicleDeadNamesForHour(targetHour)
+    deadVehicleNames,
+    reasons: {
+      capacity: totalCapacity < castCount,
+      area: areaGroups.size > effectiveVehicleCount && castCount > 0,
+      dead: deadVehicleNames.length > 0
+    }
   };
-}
-
-function getDiagnosisReasonTokens(diag) {
-  const tokens = [];
-  if (!diag) return tokens;
-  if (Number(diag.totalCapacity || 0) < Number(diag.castCount || 0)) {
-    tokens.push({ key: 'capacity', label: `定員 不足${Math.max(0, Number(diag.castCount || 0) - Number(diag.totalCapacity || 0))}名`, tone: 'danger' });
-  }
-  if (Number(diag.castCount || 0) > 0 && Number(diag.areaGroupCount || 0) > Number(diag.effectiveVehicleCount || 0)) {
-    tokens.push({ key: 'area', label: `方面 ${diag.areaGroupCount}系統`, tone: 'warn' });
-  }
-  if (Array.isArray(diag.deadVehicleNames) && diag.deadVehicleNames.length) {
-    tokens.push({ key: 'dead', label: `車両ロスト ${diag.deadVehicleNames.length}台`, tone: 'warn' });
-  }
-  if (!tokens.length) tokens.push({ key: 'ok', label: '問題なし', tone: 'ok' });
-  return tokens;
-}
-
-function getDiagnosisHeadline(diag, mode = 'default') {
-  if (!diag) return '診断なし';
-  if (Number(diag.totalCapacity || 0) < Number(diag.castCount || 0)) return '定員オーバー見込み';
-  if (Number(diag.castCount || 0) > 0 && Number(diag.areaGroupCount || 0) > Number(diag.effectiveVehicleCount || 0)) {
-    return mode === 'simulation' ? '最小限統合が必要' : '車両不足見込み';
-  }
-  if (Array.isArray(diag.deadVehicleNames) && diag.deadVehicleNames.length) return '次便影響あり';
-  return '成立';
-}
-
-function renderDiagnosisCardsHtml(diagList, options = {}) {
-  const mode = options.mode || 'default';
-  if (!Array.isArray(diagList) || !diagList.length) return `<div class="hybrid-diagnosis muted">診断対象がありません</div>`;
-  return `
-    <div class="diagnosis-cards-grid">
-      ${diagList.map(diag => {
-        if (!diag) return '';
-        const statusClass = diag.statusKey || 'ok';
-        const reasonTokens = getDiagnosisReasonTokens(diag);
-        const deadText = Array.isArray(diag.deadVehicleNames) && diag.deadVehicleNames.length ? escapeHtml(diag.deadVehicleNames.join(' / ')) : 'なし';
-        return `
-          <article class="diagnosis-card ${statusClass}">
-            <div class="diagnosis-card-head">
-              <div class="diagnosis-card-label">${escapeHtml(diag.label || getHourLabel(diag.hour))}</div>
-              <div class="diagnosis-card-status">${escapeHtml(diag.statusText || 'OK')}</div>
-            </div>
-            <div class="diagnosis-card-main">${escapeHtml(getDiagnosisHeadline(diag, mode))}</div>
-            <div class="diagnosis-stat-grid">
-              <div class="diagnosis-stat"><span class="k">👤</span><span class="v">${Number(diag.castCount || 0)}名</span></div>
-              <div class="diagnosis-stat"><span class="k">🚗</span><span class="v">${Number(diag.effectiveVehicleCount || 0)}台</span></div>
-              <div class="diagnosis-stat"><span class="k">🪑</span><span class="v">${Number(diag.totalCapacity || 0)}席</span></div>
-              <div class="diagnosis-stat"><span class="k">🧭</span><span class="v">${Number(diag.areaGroupCount || 0)}系統</span></div>
-            </div>
-            <div class="diagnosis-reason-row">
-              ${reasonTokens.map(token => `<span class="diagnosis-reason-chip ${escapeHtml(token.tone)}">${escapeHtml(token.label)}</span>`).join('')}
-            </div>
-            <div class="diagnosis-deadline-row">
-              <span class="muted">次便NG車両</span>
-              <strong>${deadText}</strong>
-            </div>
-          </article>
-        `;
-      }).join('')}
-    </div>
-  `;
 }
 
 function buildSummaryItemsHtml(items) {
@@ -613,7 +562,47 @@ function buildSummaryItemsHtml(items) {
   `).join("");
 }
 
+function buildDiagnosisReasonChips(diag) {
+  const chips = [];
+  if (diag.reasons.capacity) chips.push(`<span class="diag-reason-chip danger">定員</span>`);
+  if (diag.reasons.area) chips.push(`<span class="diag-reason-chip warn">方面</span>`);
+  if (diag.reasons.dead) chips.push(`<span class="diag-reason-chip dead">車両ロスト</span>`);
+  if (!chips.length) chips.push(`<span class="diag-reason-chip ok">余裕あり</span>`);
+  return chips.join("");
+}
+
+function buildDiagnosisCardHtml(title, diag, options = {}) {
+  const modeText = options.modeText ? `<div class="diag-card-mode">${escapeHtml(options.modeText)}</div>` : "";
+  const statusLabel = diag.statusKey === "danger" ? "赤" : (diag.statusKey === "warn" ? "黄" : "青");
+  const mainText = diag.statusKey === "danger" ? "要確認" : (diag.statusKey === "warn" ? "注意" : "問題なし");
+  const shortageText = diag.shortageCount > 0 ? `未配車見込み ${diag.shortageCount}名` : "未配車見込み 0名";
+  const deadText = diag.deadVehicleNames.length ? `次便NG: ${escapeHtml(diag.deadVehicleNames.join(" / "))}` : "次便NG: なし";
+
+  return `
+    <div class="diagnosis-card ${diag.statusKey}">
+      <div class="diag-card-top">
+        <div>
+          <div class="diag-card-title">${escapeHtml(title)}</div>
+          ${modeText}
+        </div>
+        <div class="diag-status-badge ${diag.statusKey}">${statusLabel}</div>
+      </div>
+      <div class="diag-main">${mainText}</div>
+      <div class="diag-metrics">
+        <div class="diag-metric"><span class="diag-metric-label">人数</span><span class="diag-metric-value">${diag.castCount}名</span></div>
+        <div class="diag-metric"><span class="diag-metric-label">車両</span><span class="diag-metric-value">${diag.effectiveVehicleCount}台</span></div>
+        <div class="diag-metric"><span class="diag-metric-label">定員</span><span class="diag-metric-value">${diag.totalCapacity}席</span></div>
+      </div>
+      <div class="diag-reasons">${buildDiagnosisReasonChips(diag)}</div>
+      <div class="diag-subline">${shortageText}</div>
+      <div class="diag-subline">${deadText}</div>
+    </div>
+  `;
+}
+
 function renderOperationAndSimulationUI() {
+  if (!els.operationContextSummary && !els.operationDiagnosis && !els.simulationSlotSelect) return;
+
   const operationBaseHour = getOperationBaseHour();
   const realNextHour = getNextHourSlot(operationBaseHour);
   const lastHour = getLastHourSlot();
@@ -631,12 +620,12 @@ function renderOperationAndSimulationUI() {
   }
 
   if (els.operationDiagnosis) {
-    els.operationDiagnosis.className = 'hybrid-diagnosis diagnosis-card-wrap';
-    els.operationDiagnosis.innerHTML = renderDiagnosisCardsHtml([
-      { ...operationDiag, label: '今便' },
-      nextDiag ? { ...nextDiag, label: '次便' } : null,
-      lastDiag ? { ...lastDiag, label: 'ラスト便' } : null
-    ].filter(Boolean));
+    els.operationDiagnosis.className = "hybrid-diagnosis";
+    els.operationDiagnosis.innerHTML = [
+      buildDiagnosisCardHtml("今便", operationDiag),
+      nextDiag ? buildDiagnosisCardHtml("次便", nextDiag) : "",
+      lastDiag ? buildDiagnosisCardHtml("ラスト便", lastDiag) : ""
+    ].join("");
   }
 
   const hourOptions = getUnifiedHourSet();
@@ -649,35 +638,40 @@ function renderOperationAndSimulationUI() {
   }
 
   if (!lastSimulationResult && els.simulationDiagnosis) {
-    els.simulationDiagnosis.className = 'hybrid-diagnosis muted';
-    els.simulationDiagnosis.textContent = '試算対象便を選択してください';
+    els.simulationDiagnosis.className = "hybrid-diagnosis muted";
+    els.simulationDiagnosis.textContent = "試算対象便を選択してください";
   }
 }
 
 function runSlotDiagnosisPreview() {
   const hour = Number(els.simulationSlotSelect?.value ?? simulationSlotHour ?? getOperationBaseHour());
   simulationSlotHour = hour;
-  const diag = diagnoseHourWindow(hour);
-  lastSimulationResult = { type: 'diagnosis', hour, diag };
+  const ignoreClosed = isSimulationIgnoreClosedEnabled();
+  const diag = diagnoseHourWindow(hour, { ignoreClosed });
+  lastSimulationResult = { type: "diagnosis", hour, diag, ignoreClosed };
+
   if (els.simulationDiagnosis) {
-    els.simulationDiagnosis.className = 'hybrid-diagnosis diagnosis-card-wrap';
-    els.simulationDiagnosis.innerHTML = renderDiagnosisCardsHtml([
-      { ...diag, label: '試算対象' }
-    ], { mode: 'simulation' });
+    els.simulationDiagnosis.className = "hybrid-diagnosis";
+    els.simulationDiagnosis.innerHTML = buildDiagnosisCardHtml(
+      "試算対象便",
+      diag,
+      { modeText: ignoreClosed ? "完了・キャンセル無視" : "実績反映" }
+    );
   }
+
   if (els.simulationPreview) {
     if (!diag.rows.length) {
-      els.simulationPreview.className = 'simulation-preview muted';
-      els.simulationPreview.textContent = 'この便の予定対象はありません';
+      els.simulationPreview.className = "simulation-preview muted";
+      els.simulationPreview.textContent = "この便の予定対象はありません";
     } else {
-      const list = diag.rows.map(row => `${row?.casts?.name || '-'} / ${normalizeAreaLabel(row?.destination_area || row?.planned_area || row?.casts?.area || '-')}`).join('<br>');
-      els.simulationPreview.className = 'simulation-preview';
+      const list = diag.rows.map(row => `${row?.casts?.name || "-"} / ${normalizeAreaLabel(row?.destination_area || row?.planned_area || row?.casts?.area || "-")}`).join("<br>");
+      els.simulationPreview.className = "simulation-preview";
       els.simulationPreview.innerHTML = `
         <div class="sim-preview-head">
           <h4 class="sim-preview-title">試算対象一覧</h4>
           <span class="chip">${getHourLabel(diag.hour)}</span>
         </div>
-        <div class="sim-preview-meta">予定と未完了Actualを合成した参考一覧です</div>
+        <div class="sim-preview-meta">${ignoreClosed ? "完了・キャンセルを無視した重めの試算です" : "予定と未完了Actualを合成した参考一覧です"}</div>
         <div>${list}</div>
       `;
     }
@@ -687,34 +681,23 @@ function runSlotDiagnosisPreview() {
 function getAssignmentsForPreview(items, vehicles, monthlyMap) {
   let assignments = optimizeAssignments(items, vehicles, monthlyMap);
   if (!Array.isArray(assignments)) assignments = [];
-
-  if (__hasEnoughVehiclesForDisplayGroups(items, vehicles)) {
-    assignments = __buildAssignmentsPreserveDisplayGroups(items, vehicles, monthlyMap);
-  } else {
-    const routeFlowAssignments = optimizeAssignmentsByRouteFlow(assignments, items, vehicles);
-    assignments = Array.isArray(routeFlowAssignments) ? routeFlowAssignments : assignments;
-    if (!Array.isArray(assignments) || !assignments.length) assignments = buildFallbackAssignments(items, vehicles);
-    const balancedAssignments = optimizeAssignmentsByDistanceBalance(assignments, items, vehicles, monthlyMap);
-    assignments = Array.isArray(balancedAssignments) ? balancedAssignments : assignments;
-    const correctedAssignments = applyLastTripDistanceCorrectionToAssignments(assignments, items, vehicles, monthlyMap);
-    assignments = Array.isArray(correctedAssignments) ? correctedAssignments : assignments;
-    const manualAssignments = applyManualLastVehicleToAssignments(assignments, vehicles);
-    assignments = Array.isArray(manualAssignments) ? manualAssignments : assignments;
-  }
-
+  if (!Array.isArray(assignments) || !assignments.length) assignments = buildFallbackAssignments(items, vehicles);
+  const manualAssignments = applyManualLastVehicleToAssignments(assignments, vehicles);
+  assignments = Array.isArray(manualAssignments) ? manualAssignments : assignments;
   return Array.isArray(assignments) ? assignments : [];
 }
 
 function runSimulationDispatchPreview() {
   const hour = Number(els.simulationSlotSelect?.value ?? simulationSlotHour ?? getOperationBaseHour());
   simulationSlotHour = hour;
-  const items = buildProjectedRowsForHour(hour).map((row, index) => ({ ...row, id: Number(row?.id || -(index + 1)) }));
-  const vehicles = getEffectiveVehiclesForHour(hour);
+  const ignoreClosed = isSimulationIgnoreClosedEnabled();
+  const items = buildProjectedRowsForHour(hour, { ignoreClosed }).map((row, index) => ({ ...row, id: Number(row?.id || -(index + 1)) }));
+  const vehicles = getEffectiveVehiclesForHour(hour, { ignoreClosed });
   const monthlyMap = buildMonthlyDistanceMapForCurrentMonth();
   const assignments = getAssignmentsForPreview(items, vehicles, monthlyMap);
   const applied = items.map(item => {
     const assigned = assignments.find(a => Number(a?.item_id) === Number(item.id));
-    return assigned ? { ...item, vehicle_id: assigned.vehicle_id, driver_name: assigned.driver_name || '' } : { ...item };
+    return assigned ? { ...item, vehicle_id: assigned.vehicle_id, driver_name: assigned.driver_name || "" } : { ...item };
   });
   const cards = buildDailyDispatchVehicleCards(vehicles, applied, monthlyMap);
   const html = cards.map(({ vehicle, orderedRows }) => {
@@ -723,39 +706,35 @@ function runSimulationDispatchPreview() {
     const body = orderedRows.length
       ? orderedRows.map((row, index) => `
           <div class="sim-preview-row">
-            <span>順番${index + 1} ${escapeHtml(row?.casts?.name || '-')} / ${escapeHtml(normalizeAreaLabel(row?.destination_area || row?.planned_area || row?.casts?.area || '-'))}</span>
+            <span>順番${index + 1} ${escapeHtml(row?.casts?.name || "-")} / ${escapeHtml(normalizeAreaLabel(row?.destination_area || row?.planned_area || row?.casts?.area || "-"))}</span>
             <span>${Number(row?.distance_km || 0).toFixed(1)}km</span>
           </div>
-        `).join('')
+        `).join("")
       : `<div class="muted">送りなし</div>`;
     return `
       <div class="sim-preview-card">
-        <h4>${escapeHtml(vehicle?.driver_name || vehicle?.plate_number || '-')}</h4>
+        <h4>${escapeHtml(vehicle?.driver_name || vehicle?.plate_number || "-")}</h4>
         <div class="sim-preview-meta">人数 ${orderedRows.length} / 距離 ${summary.totalKm.toFixed(1)}km / 戻り ${escapeHtml(forecast.returnAfterLabel)} / 次便可能 ${escapeHtml(forecast.predictedReadyTime)}</div>
         ${body}
       </div>
     `;
-  }).join('');
+  }).join("");
 
   const unassigned = applied.filter(item => !Number(item?.vehicle_id || 0));
-  const diag = diagnoseHourWindow(hour);
-  lastSimulationResult = { type: 'dispatch', hour, diag, unassignedCount: unassigned.length };
+  const diag = diagnoseHourWindow(hour, { ignoreClosed });
+  lastSimulationResult = { type: "dispatch", hour, diag, unassignedCount: unassigned.length, ignoreClosed };
+
   if (els.simulationDiagnosis) {
-    const diagForRender = {
-      ...diag,
-      label: '試算対象',
-      castCount: diag.castCount,
-      totalCapacity: diag.totalCapacity,
-      effectiveVehicleCount: vehicles.length,
-      statusKey: (unassigned.length > 0 || diag.statusKey === 'danger') ? 'danger' : (diag.statusKey === 'warn' ? 'warn' : 'ok'),
-      statusText: unassigned.length > 0 ? `未配車見込み ${unassigned.length}名` : diag.statusText,
-      shortageCount: Math.max(Number(diag.shortageCount || 0), unassigned.length)
-    };
-    els.simulationDiagnosis.className = 'hybrid-diagnosis diagnosis-card-wrap';
-    els.simulationDiagnosis.innerHTML = renderDiagnosisCardsHtml([diagForRender], { mode: 'simulation' });
+    els.simulationDiagnosis.className = "hybrid-diagnosis";
+    els.simulationDiagnosis.innerHTML = buildDiagnosisCardHtml(
+      "試算配車",
+      { ...diag, shortageCount: Math.max(diag.shortageCount, unassigned.length) },
+      { modeText: ignoreClosed ? "完了・キャンセル無視" : "実績反映" }
+    );
   }
+
   if (els.simulationPreview) {
-    els.simulationPreview.className = 'simulation-preview';
+    els.simulationPreview.className = "simulation-preview";
     els.simulationPreview.innerHTML = `
       <div class="sim-preview-head">
         <h4 class="sim-preview-title">試算配車プレビュー</h4>
@@ -4161,7 +4140,6 @@ async function loadPlansByDate(dateStr) {
   renderPlanSelect();
   renderPlanCastSelect();
   renderHomeSummary();
-  renderOperationAndSimulationUI();
 }
 
 
@@ -5288,7 +5266,6 @@ function renderDailyVehicleChecklist() {
     els.dailyVehicleChecklist.appendChild(row);
   });
 
-  renderOperationAndSimulationUI();
   els.dailyVehicleChecklist.querySelectorAll(".vehicle-check-input").forEach(input => {
     input.addEventListener("change", () => {
       const id = Number(input.dataset.id);
@@ -8346,6 +8323,7 @@ async function importAllDataFromFile() {
     alert("全体インポートが完了しました");
     await loadHomeAndAll();
     renderManualLastVehicleInfo();
+    renderOperationAndSimulationUI();
   } catch (error) {
     console.error("importAllDataFromFile error:", error);
     alert("全体インポートに失敗しました: " + error.message);
@@ -8667,12 +8645,6 @@ function bindPlanAndActualFormEvents() {
 
 function bindDispatchEvents() {
   if (els.optimizeBtn) els.optimizeBtn.addEventListener("click", runAutoDispatch);
-  if (els.simulationSlotSelect) els.simulationSlotSelect.addEventListener("change", () => {
-    simulationSlotHour = Number(els.simulationSlotSelect.value || getOperationBaseHour());
-    runSlotDiagnosisPreview();
-  });
-  if (els.runSimulationBtn) els.runSimulationBtn.addEventListener("click", runSlotDiagnosisPreview);
-  if (els.runSimulationDispatchBtn) els.runSimulationDispatchBtn.addEventListener("click", runSimulationDispatchPreview);
 }
 
 function bindPostDispatchEvents() {
@@ -8754,6 +8726,16 @@ function setupEvents() {
   els.uncheckAllVehiclesBtn?.addEventListener("click", () => toggleAllVehicles(false));
   els.clearManualLastVehicleBtn?.addEventListener("click", clearManualLastVehicle);
   els.resetMonthlySummaryBtn?.addEventListener("click", resetMonthlySummary);
+  els.simulationSlotSelect?.addEventListener("change", () => {
+    simulationSlotHour = Number(els.simulationSlotSelect?.value || getOperationBaseHour());
+    runSlotDiagnosisPreview();
+  });
+  els.simulationIgnoreClosedToggle?.addEventListener("change", () => {
+    if (lastSimulationResult?.type === "dispatch") runSimulationDispatchPreview();
+    else runSlotDiagnosisPreview();
+  });
+  els.runSimulationBtn?.addEventListener("click", runSlotDiagnosisPreview);
+  els.runSimulationDispatchBtn?.addEventListener("click", runSimulationDispatchPreview);
 
   els.dispatchDate?.addEventListener("change", syncDateAndReloadFromDispatchDate);
   els.planDate?.addEventListener("change", syncDateAndReloadFromPlanDate);
