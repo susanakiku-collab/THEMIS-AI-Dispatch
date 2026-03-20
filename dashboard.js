@@ -5391,7 +5391,7 @@ function renderDailyVehicleChecklist() {
   header.className = "vehicle-check-header";
   header.innerHTML = `
     <div class="vehicle-check-header-info"></div>
-    <div class="vehicle-check-header-col">出勤</div>
+    <div class="vehicle-check-header-col">可能車両</div>
     <div class="vehicle-check-header-col">ラスト便</div>
   `;
   els.dailyVehicleChecklist.appendChild(header);
@@ -5414,7 +5414,7 @@ function renderDailyVehicleChecklist() {
       </div>
       <label class="vehicle-check-toggle vehicle-check-toggle-work">
         <input class="vehicle-check-input" type="checkbox" data-id="${vehicle.id}" ${activeVehicleIdsForToday.has(Number(vehicle.id)) ? "checked" : ""} />
-        <span>出勤</span>
+        <span>可能車両</span>
       </label>
       <label class="vehicle-check-toggle vehicle-check-toggle-last">
         <input class="driver-last-trip-input" type="checkbox" data-id="${vehicle.id}" ${isDriverLastTripChecked(vehicle.id) ? "checked" : ""} />
@@ -7117,7 +7117,7 @@ async function runAutoDispatch() {
     ? getSelectedVehiclesForToday().filter(Boolean)
     : [];
   if (!selectedVehicles.length) {
-    alert("本日使用する車両を選択してください");
+    alert("可能車両を選択してください");
     return;
   }
 
@@ -7173,8 +7173,22 @@ async function runAutoDispatch() {
   await loadActualsByDate(els.actualDate?.value || todayStr());
   await loadPlansByDate(els.planDate?.value || todayStr());
   renderDailyDispatchResult();
+  scrollToDispatchResult();
 }
 
+
+
+function scrollToDispatchResult() {
+  try {
+    const target = els.dailyDispatchResult || document.getElementById("dailyDispatchResult");
+    if (!target) return;
+    window.requestAnimationFrame(() => {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  } catch (error) {
+    console.warn("scrollToDispatchResult error:", error);
+  }
+}
 
 function getVehicleRotationForecastSafe(vehicle, orderedRows) {
   try {
@@ -8607,7 +8621,7 @@ function renderDailyMileageInputs() {
   els.dailyMileageInputs.innerHTML = "";
 
   if (!selectedVehicles.length) {
-    els.dailyMileageInputs.innerHTML = `<div class="muted">出勤車両を選択すると入力欄が表示されます</div>`;
+    els.dailyMileageInputs.innerHTML = `<div class="muted">可能車両を選択すると入力欄が表示されます</div>`;
     return;
   }
 
@@ -8669,7 +8683,7 @@ async function saveDailyMileageReports() {
   const selectedVehicles = getSelectedVehiclesForToday();
 
   if (!selectedVehicles.length) {
-    alert("先に出勤車両を選択してください");
+    alert("先に可能車両を選択してください");
     return;
   }
 
